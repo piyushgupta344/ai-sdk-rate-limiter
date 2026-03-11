@@ -1,0 +1,63 @@
+{
+  "name": "ai-sdk-rate-limiter",
+  "version": "0.1.0",
+  "description": "Smart rate limiting, queuing, and cost tracking middleware for AI SDK calls. Works across providers.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "ai",
+    "rate-limit",
+    "openai",
+    "anthropic",
+    "vercel-ai-sdk",
+    "llm",
+    "queue",
+    "retry",
+    "cost-tracking",
+    "middleware"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@ai-sdk/provider": "^3.0.8",
+    "ai": "^6.0.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  },
+  "peerDependencies": {
+    "@ai-sdk/provider": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@ai-sdk/provider": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
