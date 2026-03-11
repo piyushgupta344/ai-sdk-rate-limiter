@@ -1,6 +1,6 @@
 {
   "name": "ai-sdk-rate-limiter",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Smart rate limiting, queuing, and cost tracking middleware for AI SDK calls. Works across providers.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -26,7 +26,20 @@
         "types": "./dist/redis.d.cts",
         "default": "./dist/redis.cjs"
       }
+    },
+    "./otel": {
+      "import": {
+        "types": "./dist/otel.d.ts",
+        "default": "./dist/otel.js"
+      },
+      "require": {
+        "types": "./dist/otel.d.cts",
+        "default": "./dist/otel.cjs"
+      }
     }
+  },
+  "bin": {
+    "ai-sdk-rate-limiter": "./dist/cli.js"
   },
   "files": [
     "dist"
@@ -61,13 +74,17 @@
   },
   "peerDependencies": {
     "@ai-sdk/provider": ">=1.0.0",
-    "ioredis": ">=4.0.0"
+    "ioredis": ">=4.0.0",
+    "@opentelemetry/api": ">=1.0.0"
   },
   "peerDependenciesMeta": {
     "@ai-sdk/provider": {
       "optional": true
     },
     "ioredis": {
+      "optional": true
+    },
+    "@opentelemetry/api": {
       "optional": true
     }
   },
