@@ -39,7 +39,7 @@
     }
   },
   "bin": {
-    "ai-sdk-rate-limiter": "./dist/cli.js"
+    "ai-sdk-rate-limiter": "dist/cli.js"
   },
   "files": [
     "dist"
