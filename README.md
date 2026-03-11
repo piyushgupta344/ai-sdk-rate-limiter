@@ -304,7 +304,7 @@ const model = req.user.plan === 'paid'
 
 ## Built-in model registry
 
-Limits and pricing are built-in for every major model. These defaults are Tier 1 (most conservative) — override with your actual tier limits.
+Limits and pricing are built-in for every major model across 6 providers. Defaults are conservative (free/Tier 1) — override with your actual plan limits.
 
 **OpenAI**
 
@@ -332,13 +332,54 @@ Limits and pricing are built-in for every major model. These defaults are Tier 1
 | gemini-1.5-pro | 2 | 32,000 | $1.25 | $5.00 |
 | gemini-1.5-flash | 15 | 1,000,000 | $0.075 | $0.30 |
 
+**Groq** (free tier defaults — on-demand tier is 6,000 RPM / 200k TPM)
+
+| Model | RPM | ITPM | Input $/M | Output $/M |
+|---|---|---|---|---|
+| llama-3.3-70b-versatile | 30 | 6,000 | $0.59 | $0.79 |
+| llama-3.1-8b-instant | 30 | 20,000 | $0.05 | $0.08 |
+| mixtral-8x7b-32768 | 30 | 5,000 | $0.24 | $0.24 |
+| gemma2-9b-it | 30 | 15,000 | $0.20 | $0.20 |
+| deepseek-r1-distill-llama-70b | 30 | 6,000 | $0.75 | $0.99 |
+
+**Mistral**
+
+| Model | RPM | ITPM | Input $/M | Output $/M |
+|---|---|---|---|---|
+| mistral-large-latest | 500 | 100,000 | $2.00 | $6.00 |
+| mistral-small-latest | 500 | 100,000 | $0.10 | $0.30 |
+| codestral-latest | 500 | 100,000 | $0.30 | $0.90 |
+| open-mistral-nemo | 500 | 100,000 | $0.15 | $0.15 |
+| pixtral-large-latest | 500 | 100,000 | $2.00 | $6.00 |
+
+**Cohere** (trial tier defaults — production tier is 10,000+ RPM)
+
+| Model | RPM | ITPM | Input $/M | Output $/M |
+|---|---|---|---|---|
+| command-r-plus | 20 | 100,000 | $2.50 | $10.00 |
+| command-r | 20 | 100,000 | $0.15 | $0.60 |
+| command | 20 | 100,000 | $0.50 | $1.50 |
+| command-light | 20 | 100,000 | $0.15 | $0.60 |
+
 Unknown models fall back to 60 RPM / 100k ITPM with no cost tracking. You can inspect or extend the registry:
 
 ```typescript
-import { OPENAI_MODELS, ANTHROPIC_MODELS, resolveModelLimits, isKnownModel } from 'ai-sdk-rate-limiter'
+import {
+  OPENAI_MODELS,
+  ANTHROPIC_MODELS,
+  GOOGLE_MODELS,
+  GROQ_MODELS,
+  MISTRAL_MODELS,
+  COHERE_MODELS,
+  resolveModelLimits,
+  isKnownModel,
+} from 'ai-sdk-rate-limiter'
 
-console.log(OPENAI_MODELS['gpt-4o'])
-// { rpm: 500, itpm: 30000, otpm: 30000, inputPricePerMillion: 2.5, ... }
+console.log(GROQ_MODELS['llama-3.3-70b-versatile'])
+// { rpm: 30, itpm: 6000, rpd: 1000, inputPricePerMillion: 0.59, ... }
+
+console.log(isKnownModel('llama-3.3-70b-versatile', 'groq'))
+// true
 
 console.log(isKnownModel('my-fine-tune', 'openai'))
 // false → will use fallback limits

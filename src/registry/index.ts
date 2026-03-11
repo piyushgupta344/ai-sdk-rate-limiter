@@ -2,6 +2,9 @@ import type { ModelLimits, ModelLimitOverride } from '../types.js'
 import { OPENAI_MODELS } from './openai.js'
 import { ANTHROPIC_MODELS } from './anthropic.js'
 import { GOOGLE_MODELS } from './google.js'
+import { GROQ_MODELS } from './groq.js'
+import { MISTRAL_MODELS } from './mistral.js'
+import { COHERE_MODELS } from './cohere.js'
 
 /**
  * Fallback limits used when a model is not in the registry.
@@ -85,11 +88,32 @@ function getFromRegistry(modelId: string, provider: string): ModelLimits | undef
     if (GOOGLE_MODELS[stripped]) return GOOGLE_MODELS[stripped]
   }
 
+  if (provider === 'groq') {
+    if (GROQ_MODELS[modelId]) return GROQ_MODELS[modelId]
+    const stripped = modelId.replace(/^groq\//, '')
+    if (GROQ_MODELS[stripped]) return GROQ_MODELS[stripped]
+  }
+
+  if (provider === 'mistral') {
+    if (MISTRAL_MODELS[modelId]) return MISTRAL_MODELS[modelId]
+    const stripped = modelId.replace(/^mistral\//, '')
+    if (MISTRAL_MODELS[stripped]) return MISTRAL_MODELS[stripped]
+  }
+
+  if (provider === 'cohere') {
+    if (COHERE_MODELS[modelId]) return COHERE_MODELS[modelId]
+    const stripped = modelId.replace(/^cohere\//, '')
+    if (COHERE_MODELS[stripped]) return COHERE_MODELS[stripped]
+  }
+
   // Cross-provider scan (for unknown or gateway providers)
   return (
     OPENAI_MODELS[modelId] ??
     ANTHROPIC_MODELS[modelId] ??
-    GOOGLE_MODELS[modelId]
+    GOOGLE_MODELS[modelId] ??
+    GROQ_MODELS[modelId] ??
+    MISTRAL_MODELS[modelId] ??
+    COHERE_MODELS[modelId]
   )
 }
 
