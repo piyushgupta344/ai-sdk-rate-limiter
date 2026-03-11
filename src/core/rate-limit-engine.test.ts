@@ -187,10 +187,10 @@ describe('RateLimitEngine', () => {
   })
 
   // -------------------------------------------------------------------------
-  it('returns estimatedWaitMs of 0 when capacity is available', () => {
+  it('returns estimatedWaitMs of 0 when capacity is available', async () => {
     const engine = new RateLimitEngine()
     const key = 'openai:gpt-4o'
-    expect(engine.estimatedWaitMs(key, LIMITS, 10)).toBe(0)
+    expect(await engine.estimatedWaitMs(key, LIMITS, 10)).toBe(0)
   })
 
   // -------------------------------------------------------------------------

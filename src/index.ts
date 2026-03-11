@@ -70,6 +70,9 @@ export type {
   RateLimiter,
 } from './types.js'
 
+// Store interface (for custom store implementations)
+export type { RateLimitStore } from './store/interface.js'
+
 // Registry utilities (useful for extending/inspecting the built-in model data)
 export { resolveModelLimits, isKnownModel } from './registry/index.js'
 export { OPENAI_MODELS } from './registry/openai.js'

@@ -1,6 +1,6 @@
 {
   "name": "ai-sdk-rate-limiter",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Smart rate limiting, queuing, and cost tracking middleware for AI SDK calls. Works across providers.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -15,6 +15,16 @@
       "require": {
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
+      }
+    },
+    "./redis": {
+      "import": {
+        "types": "./dist/redis.d.ts",
+        "default": "./dist/redis.js"
+      },
+      "require": {
+        "types": "./dist/redis.d.cts",
+        "default": "./dist/redis.cjs"
       }
     }
   },
@@ -50,10 +60,14 @@
     "vitest": "^3.0.0"
   },
   "peerDependencies": {
-    "@ai-sdk/provider": ">=1.0.0"
+    "@ai-sdk/provider": ">=1.0.0",
+    "ioredis": ">=4.0.0"
   },
   "peerDependenciesMeta": {
     "@ai-sdk/provider": {
+      "optional": true
+    },
+    "ioredis": {
       "optional": true
     }
   },

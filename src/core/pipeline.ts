@@ -63,6 +63,7 @@ export class Pipeline {
     this.config = config
     this.engine = new RateLimitEngine({
       maxQueueSize: config.queue?.maxSize ?? 500,
+      ...(config.store !== undefined && { store: config.store }),
     })
     this.costTracker = new CostTracker()
     this.emitter = new Emitter()
@@ -288,7 +289,7 @@ export class Pipeline {
     return { models, totalQueueDepth: 0 }
   }
 
-  estimatedWait(modelId: string, provider: string, priority: Priority = 'normal'): number {
+  async estimatedWait(modelId: string, provider: string, priority: Priority = 'normal'): Promise<number> {
     const key = `${provider}:${modelId}`
     const limits = this.resolveModelLimits(modelId, provider)
     return this.engine.estimatedWaitMs(key, limits)

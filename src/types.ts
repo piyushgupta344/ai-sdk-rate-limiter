@@ -239,6 +239,24 @@ export interface RateLimiterConfig {
   queue?: QueueConfig
   retry?: RetryConfig
   on?: EventHandlers
+  /**
+   * Pluggable rate-limit window store.
+   *
+   * Defaults to InMemoryStore (per-process sliding window).
+   * Use RedisStore from 'ai-sdk-rate-limiter/redis' to share rate limit
+   * state across multiple instances:
+   *
+   * @example
+   * ```typescript
+   * import { RedisStore } from 'ai-sdk-rate-limiter/redis'
+   * import Redis from 'ioredis'
+   *
+   * const limiter = createRateLimiter({
+   *   store: new RedisStore(new Redis(process.env.REDIS_URL)),
+   * })
+   * ```
+   */
+  store?: import('./store/interface.js').RateLimitStore
 }
 
 // ---------------------------------------------------------------------------
@@ -282,8 +300,9 @@ export interface RateLimiter {
   /**
    * Estimated wait time in ms for a new request at this priority level.
    * Returns 0 if the model would proceed immediately.
+   * With RedisStore this is an async operation (Redis round-trip).
    */
-  estimatedWait(modelId: string, priority?: Priority): number
+  estimatedWait(modelId: string, priority?: Priority): Promise<number>
 
   /**
    * Wrap a raw AI SDK client (OpenAI, Anthropic, Groq, Mistral, Cohere) with

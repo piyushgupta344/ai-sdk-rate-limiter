@@ -214,6 +214,53 @@ const result = await generateText({ model, prompt })
 
 ---
 
+## Multi-instance Redis store
+
+By default, rate limit state is in-memory (per-process). In multi-instance deployments — serverless functions, multiple pods, workers — each instance has its own counters. Install the Redis store to share state across all instances:
+
+```
+npm install ioredis
+```
+
+```typescript
+import { createRateLimiter } from 'ai-sdk-rate-limiter'
+import { RedisStore } from 'ai-sdk-rate-limiter/redis'
+import Redis from 'ioredis'
+
+const limiter = createRateLimiter({
+  store: new RedisStore(new Redis(process.env.REDIS_URL)),
+  // ... rest of your config
+})
+```
+
+That's the entire change. All APIs — `wrap()`, `rawProxy()`, events, cost reports — work identically. The Redis store enforces rate limits collectively so no two instances can jointly exceed the API limits.
+
+**How it works:**
+
+Each request atomically runs a Lua script that:
+1. Removes entries older than 60 seconds from a sorted set (`ZREMRANGEBYSCORE`)
+2. Counts remaining requests and sums input tokens
+3. Checks against RPM and ITPM limits
+4. If allowed: reserves the slot (`ZADD`) and returns immediately
+5. If blocked: returns the timestamp when the next slot opens
+
+The local queue (priority ordering, drain timer, timeout handling) stays in-memory per instance — only the window counters are shared.
+
+**Options:**
+
+```typescript
+new RedisStore(redis, {
+  keyPrefix: 'rl:myapp:',  // namespace if multiple apps share Redis
+  windowMs:  60_000,        // window size; match your provider's limit window
+})
+```
+
+**Compatible clients** — any Redis client with `eval()`, `get()`, and `set()` works: `ioredis`, `node-redis`, Upstash Redis.
+
+**Single-instance deployments:** the default `InMemoryStore` is more accurate (true sliding window, no network round-trips) and zero-config. Only switch to `RedisStore` when you actually need cross-instance coordination.
+
+---
+
 ## Raw SDK proxy
 
 If you're using the OpenAI, Anthropic, Groq, Mistral, or Cohere SDK directly — without the Vercel AI SDK — use `limiter.rawProxy()` to add rate limiting as a transparent drop-in:

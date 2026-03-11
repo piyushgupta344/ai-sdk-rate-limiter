@@ -1,15 +1,11 @@
 import type { ModelLimits, Priority } from '../types.js'
+import type { RateLimitStore } from '../store/interface.js'
+import { InMemoryStore } from '../store/in-memory-store.js'
 import { QueueTimeoutError, QueueFullError } from '../errors.js'
 
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
-
-interface WindowEntry {
-  timestamp: number
-  inputTokens: number
-  outputTokens: number
-}
 
 interface Waiter {
   resolve: () => void
@@ -20,14 +16,11 @@ interface Waiter {
   timeoutHandle: ReturnType<typeof setTimeout>
 }
 
-interface ModelState {
-  /** Sliding window entries sorted by timestamp (oldest first) */
-  window: WindowEntry[]
-  /** Priority queue of blocked requests */
+/** Per-model state that always lives in-memory (local queue only). */
+interface LocalState {
+  /** Priority-sorted queue of waiting requests */
   waiters: Waiter[]
-  /** Suppress new requests until this timestamp (set on remote 429) */
-  backoffUntil: number
-  /** Whether a drain is already scheduled */
+  /** True while a drain is running or a drain timer is active */
   drainScheduled: boolean
 }
 
@@ -41,10 +34,6 @@ const PRIORITY_RANK: Record<Priority, number> = {
   low: 2,
 }
 
-/**
- * Insert a waiter into the sorted waiters array.
- * Sort order: priority DESC (high first), then enqueue time ASC (FIFO within same priority).
- */
 function insertWaiter(waiters: Waiter[], waiter: Waiter): void {
   let lo = 0
   let hi = waiters.length
@@ -65,17 +54,24 @@ function insertWaiter(waiters: Waiter[], waiter: Waiter): void {
 }
 
 // ---------------------------------------------------------------------------
-// Main engine
+// RateLimitEngine
 // ---------------------------------------------------------------------------
 
-const WINDOW_MS = 60_000 // 1 minute
-
 export class RateLimitEngine {
-  private readonly states = new Map<string, ModelState>()
+  private readonly store: RateLimitStore
+  private readonly localStates = new Map<string, LocalState>()
   private readonly maxQueueSize: number
 
-  constructor({ maxQueueSize = 500 }: { maxQueueSize?: number } = {}) {
+  constructor({
+    maxQueueSize = 500,
+    store,
+  }: {
+    maxQueueSize?: number
+    /** Pluggable window store. Defaults to InMemoryStore (same behaviour as before). */
+    store?: RateLimitStore
+  } = {}) {
     this.maxQueueSize = maxQueueSize
+    this.store = store ?? new InMemoryStore()
   }
 
   // -------------------------------------------------------------------------
@@ -85,12 +81,10 @@ export class RateLimitEngine {
   /**
    * Acquire a slot for the given model.
    *
-   * - If capacity is available: records the request in the sliding window and
-   *   resolves immediately.
-   * - If at capacity: enqueues the request (sorted by priority) and resolves
-   *   when a slot opens.
-   * - If the queue is full: throws QueueFullError immediately.
-   * - If the request waits longer than `timeoutMs`: throws QueueTimeoutError.
+   * - If capacity is available: records the request in the window and resolves.
+   * - If at capacity: enqueues (sorted by priority) and resolves when a slot opens.
+   * - If queue is full: throws QueueFullError immediately.
+   * - If waiting exceeds timeoutMs: throws QueueTimeoutError.
    */
   async acquire(
     key: string,
@@ -103,29 +97,31 @@ export class RateLimitEngine {
       onDequeued?: (waitedMs: number) => void
     },
   ): Promise<void> {
-    const state = this.getOrCreate(key)
+    const local = this.getOrCreate(key)
 
-    if (this.canProceed(state, opts.limits, opts.estimatedInputTokens)) {
-      this.record(state, opts.estimatedInputTokens, 0)
-      return
-    }
+    const nextSlotAtMs = await this.store.checkAndRecord(
+      key,
+      opts.estimatedInputTokens,
+      opts.limits,
+    )
 
-    // Queue is full — reject immediately
-    if (state.waiters.length >= this.maxQueueSize) {
+    if (nextSlotAtMs <= Date.now()) return // slot acquired immediately
+
+    // Rate limited — queue the request
+    if (local.waiters.length >= this.maxQueueSize) {
       throw new QueueFullError(key, this.maxQueueSize)
     }
 
-    // Estimate wait and emit event before blocking
-    const estimatedWaitMs = this.estimatedWaitMs(key, opts.limits, opts.estimatedInputTokens)
-    opts.onQueued?.(state.waiters.length, estimatedWaitMs)
+    const estimatedWaitMs = Math.max(0, nextSlotAtMs - Date.now())
+    opts.onQueued?.(local.waiters.length, estimatedWaitMs)
 
     return new Promise<void>((resolve, reject) => {
       const enqueuedAt = Date.now()
 
       const timeoutHandle = setTimeout(() => {
-        const idx = state.waiters.indexOf(waiter)
-        if (idx !== -1) state.waiters.splice(idx, 1)
-        reject(new QueueTimeoutError(key, Date.now() - enqueuedAt, state.waiters.length))
+        const idx = local.waiters.indexOf(waiter)
+        if (idx !== -1) local.waiters.splice(idx, 1)
+        reject(new QueueTimeoutError(key, Date.now() - enqueuedAt, local.waiters.length))
       }, opts.timeoutMs)
 
       const waiter: Waiter = {
@@ -140,204 +136,115 @@ export class RateLimitEngine {
         timeoutHandle,
       }
 
-      insertWaiter(state.waiters, waiter)
-      this.scheduleDrain(key, opts.limits)
+      insertWaiter(local.waiters, waiter)
+      this.scheduleDrain(key, opts.limits, nextSlotAtMs)
     })
   }
 
   /**
    * Record actual token usage after a request completes.
-   * Replaces the estimated token count with the real values.
+   * Best-effort reconciliation with the estimate recorded during acquire().
    */
   recordActualUsage(key: string, inputTokens: number, outputTokens: number): void {
-    const state = this.states.get(key)
-    if (!state) return
-
-    // Find the most recent window entry (the one we recorded during acquire)
-    // and update it with actual token counts
-    for (let i = state.window.length - 1; i >= 0; i--) {
-      const entry = state.window[i]!
-      if (entry.outputTokens === 0 && entry.inputTokens > 0) {
-        entry.inputTokens = inputTokens
-        entry.outputTokens = outputTokens
-        break
-      }
-    }
+    void this.store.reconcile(key, inputTokens, outputTokens)
   }
 
   /**
-   * Apply a backoff delay to a model key.
-   * While a backoff is active, no new requests will be allowed through — they
-   * will queue and wait until backoffUntil, then drain in priority order.
-   *
-   * Called when a remote 429 comes back with a Retry-After header.
+   * Apply a backoff delay from a Retry-After header.
+   * Propagated to the store so all instances respect it (Redis) or
+   * queued requests on this instance wait (in-memory).
    */
   applyBackoff(key: string, delayMs: number): void {
-    const state = this.getOrCreate(key)
-    const newUntil = Date.now() + delayMs
-    if (newUntil > state.backoffUntil) {
-      state.backoffUntil = newUntil
-    }
+    void this.store.setBackoff(key, Date.now() + delayMs)
   }
 
   /**
-   * Estimated time in ms before the next slot opens for this model/priority.
-   * Returns 0 if a slot is available right now.
+   * Estimated wait time in ms before the next slot opens.
+   * Returns 0 if immediately available. With RedisStore this is async
+   * so we return a Promise; callers that need the value should await it.
    */
-  estimatedWaitMs(
-    key: string,
-    limits: ModelLimits,
-    estimatedTokens = 0,
-  ): number {
-    const state = this.states.get(key)
-    if (!state) return 0
-    if (this.canProceed(state, limits, estimatedTokens)) return 0
-    return this.nextSlotAt(state, limits, estimatedTokens) - Date.now()
+  async estimatedWaitMs(key: string, limits: ModelLimits, estimatedTokens = 0): Promise<number> {
+    if (!this.store.nextSlotMs) return 0
+    const nextSlot = await this.store.nextSlotMs(key, limits, estimatedTokens)
+    return Math.max(0, nextSlot - Date.now())
   }
 
   /** Current queue depth for a model */
   queueDepth(key: string): number {
-    return this.states.get(key)?.waiters.length ?? 0
+    return this.localStates.get(key)?.waiters.length ?? 0
   }
 
-  /** Snapshot of the current window state for a model */
+  /** Snapshot of the current window (delegates to store where supported) */
   windowSnapshot(key: string): { requests: number; inputTokens: number; outputTokens: number } {
-    const state = this.states.get(key)
-    if (!state) return { requests: 0, inputTokens: 0, outputTokens: 0 }
-    this.evict(state)
-    return {
-      requests: state.window.length,
-      inputTokens: state.window.reduce((s, e) => s + e.inputTokens, 0),
-      outputTokens: state.window.reduce((s, e) => s + e.outputTokens, 0),
+    if (this.store instanceof InMemoryStore) {
+      return this.store.snapshot(key)
     }
+    return { requests: 0, inputTokens: 0, outputTokens: 0 }
   }
 
   backoffUntil(key: string): number | null {
-    const state = this.states.get(key)
-    if (!state || Date.now() >= state.backoffUntil) return null
-    return state.backoffUntil
+    if (this.store instanceof InMemoryStore) {
+      return this.store.currentBackoff(key)
+    }
+    return null
   }
 
   // -------------------------------------------------------------------------
-  // Internal helpers
+  // Private helpers
   // -------------------------------------------------------------------------
 
-  private getOrCreate(key: string): ModelState {
-    let state = this.states.get(key)
+  private getOrCreate(key: string): LocalState {
+    let state = this.localStates.get(key)
     if (!state) {
-      state = { window: [], waiters: [], backoffUntil: 0, drainScheduled: false }
-      this.states.set(key, state)
+      state = { waiters: [], drainScheduled: false }
+      this.localStates.set(key, state)
     }
     return state
   }
 
-  private evict(state: ModelState): void {
-    const cutoff = Date.now() - WINDOW_MS
-    // Window is sorted oldest-first, so we can slice from the left
-    let i = 0
-    while (i < state.window.length && (state.window[i]?.timestamp ?? 0) <= cutoff) i++
-    if (i > 0) state.window.splice(0, i)
-  }
+  private scheduleDrain(key: string, limits: ModelLimits, nextSlotAtMs: number): void {
+    const local = this.localStates.get(key)
+    if (!local || local.drainScheduled) return
 
-  private canProceed(state: ModelState, limits: ModelLimits, estimatedInputTokens: number): boolean {
-    const now = Date.now()
-
-    // Backoff check — remote 429 is active
-    if (now < state.backoffUntil) return false
-
-    this.evict(state)
-
-    // RPM check
-    if (state.window.length >= limits.rpm) return false
-
-    // ITPM check
-    if (limits.itpm !== undefined) {
-      const usedInput = state.window.reduce((s, e) => s + e.inputTokens, 0)
-      if (usedInput + estimatedInputTokens > limits.itpm) return false
-    }
-
-    return true
-  }
-
-  private record(state: ModelState, inputTokens: number, outputTokens: number): void {
-    state.window.push({ timestamp: Date.now(), inputTokens, outputTokens })
-  }
-
-  /**
-   * Returns the timestamp (ms) at which the next slot will open.
-   */
-  private nextSlotAt(state: ModelState, limits: ModelLimits, estimatedInputTokens: number): number {
-    const now = Date.now()
-
-    // If backoff is active, that's the minimum wait
-    if (now < state.backoffUntil) return state.backoffUntil
-
-    this.evict(state)
-
-    let nextSlot = now
-
-    // RPM-driven slot: oldest entry in window expires at +WINDOW_MS
-    if (state.window.length >= limits.rpm && state.window[0]) {
-      nextSlot = Math.max(nextSlot, state.window[0].timestamp + WINDOW_MS + 1)
-    }
-
-    // ITPM-driven slot: find the oldest entry we need to evict to make room
-    if (limits.itpm !== undefined) {
-      let usedInput = state.window.reduce((s, e) => s + e.inputTokens, 0)
-      if (usedInput + estimatedInputTokens > limits.itpm) {
-        for (const entry of state.window) {
-          usedInput -= entry.inputTokens
-          if (usedInput + estimatedInputTokens <= limits.itpm) {
-            nextSlot = Math.max(nextSlot, entry.timestamp + WINDOW_MS + 1)
-            break
-          }
-        }
-      }
-    }
-
-    return nextSlot
-  }
-
-  /**
-   * Schedule a drain of the waiters queue for the given model.
-   * Only one drain timer is active at a time per model.
-   */
-  private scheduleDrain(key: string, limits: ModelLimits): void {
-    const state = this.states.get(key)
-    if (!state || state.drainScheduled) return
-
-    state.drainScheduled = true
-
-    const delay = Math.max(0, this.nextSlotAt(state, limits, 0) - Date.now())
+    local.drainScheduled = true
+    const delay = Math.max(0, nextSlotAtMs - Date.now())
 
     setTimeout(() => {
-      state.drainScheduled = false
-      this.drain(key, limits)
+      local.drainScheduled = false
+      void this.drain(key, limits)
     }, delay)
   }
 
-  /**
-   * Process as many waiters as possible. Reschedule if there are still waiters
-   * but no capacity yet.
-   */
-  private drain(key: string, limits: ModelLimits): void {
-    const state = this.states.get(key)
-    if (!state || state.waiters.length === 0) return
+  private async drain(key: string, limits: ModelLimits): Promise<void> {
+    const local = this.localStates.get(key)
+    if (!local) return
 
-    while (state.waiters.length > 0) {
-      const next = state.waiters[0]!
+    while (local.waiters.length > 0) {
+      const waiter = local.waiters[0]!
+      const nextSlotAtMs = await this.store.checkAndRecord(
+        key,
+        waiter.estimatedInputTokens,
+        limits,
+      )
 
-      if (!this.canProceed(state, limits, next.estimatedInputTokens)) break
+      if (nextSlotAtMs > Date.now()) {
+        // Still rate-limited — reschedule
+        this.scheduleDrain(key, limits, nextSlotAtMs)
+        return
+      }
 
-      state.waiters.shift()
-      clearTimeout(next.timeoutHandle)
-      this.record(state, next.estimatedInputTokens, 0)
-      next.resolve()
+      // Slot acquired — confirm waiter is still at front (may have timed out
+      // during the async await above)
+      if (local.waiters[0] !== waiter) {
+        // Waiter timed out; slot was consumed in the store but the request
+        // is gone. The slot will expire naturally with the window.
+        continue
+      }
+
+      local.waiters.shift()
+      clearTimeout(waiter.timeoutHandle)
+      waiter.resolve()
     }
-
-    // If there are still waiters, schedule the next drain
-    if (state.waiters.length > 0) {
-      this.scheduleDrain(key, limits)
-    }
+    // All waiters processed
   }
 }
