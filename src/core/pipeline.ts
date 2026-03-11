@@ -9,7 +9,7 @@ import type {
   EventMap,
   EventHandler,
 } from '../types.js'
-import { BudgetExceededError } from '../errors.js'
+import { BudgetExceededError, QueueTimeoutError } from '../errors.js'
 import { RateLimitEngine } from './rate-limit-engine.js'
 import { CostTracker } from './cost-tracker.js'
 import { Emitter } from './emitter.js'
@@ -17,7 +17,6 @@ import {
   DEFAULT_RETRY_CONFIG,
   withRetry,
   type ResolvedRetryConfig,
-  extractRetryAfterMs,
 } from './retry-manager.js'
 import { estimateInputTokens } from './token-estimator.js'
 import { resolveModelLimits } from '../registry/index.js'
@@ -30,6 +29,19 @@ interface TokenUsage {
 // ---------------------------------------------------------------------------
 // Config resolution helpers
 // ---------------------------------------------------------------------------
+
+function resolveRetryConfig(config: RateLimiterConfig): ResolvedRetryConfig {
+  const r = config.retry ?? {}
+  return {
+    maxAttempts: r.maxAttempts ?? DEFAULT_RETRY_CONFIG.maxAttempts,
+    backoff: r.backoff ?? DEFAULT_RETRY_CONFIG.backoff,
+    baseDelay: r.baseDelay ?? DEFAULT_RETRY_CONFIG.baseDelay,
+    maxDelay: r.maxDelay ?? DEFAULT_RETRY_CONFIG.maxDelay,
+    jitter: r.jitter ?? DEFAULT_RETRY_CONFIG.jitter,
+    parseRetryAfter: r.parseRetryAfter ?? DEFAULT_RETRY_CONFIG.parseRetryAfter,
+    retryOn: r.retryOn ?? DEFAULT_RETRY_CONFIG.retryOn,
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Scope helpers
@@ -55,19 +67,6 @@ function mergeScopeLimits(base: ModelLimits, scope: ScopeConfig): ModelLimits {
   }
 }
 
-function resolveRetryConfig(config: RateLimiterConfig): ResolvedRetryConfig {
-  const r = config.retry ?? {}
-  return {
-    maxAttempts: r.maxAttempts ?? DEFAULT_RETRY_CONFIG.maxAttempts,
-    backoff: r.backoff ?? DEFAULT_RETRY_CONFIG.backoff,
-    baseDelay: r.baseDelay ?? DEFAULT_RETRY_CONFIG.baseDelay,
-    maxDelay: r.maxDelay ?? DEFAULT_RETRY_CONFIG.maxDelay,
-    jitter: r.jitter ?? DEFAULT_RETRY_CONFIG.jitter,
-    parseRetryAfter: r.parseRetryAfter ?? DEFAULT_RETRY_CONFIG.parseRetryAfter,
-    retryOn: r.retryOn ?? DEFAULT_RETRY_CONFIG.retryOn,
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Pipeline
 // ---------------------------------------------------------------------------
@@ -83,6 +82,8 @@ export class Pipeline {
   private readonly emitter: Emitter
   private readonly retryConfig: ResolvedRetryConfig
   private readonly config: RateLimiterConfig
+  /** Stable mapping from engine key → parsed metadata for getStatus() */
+  private readonly keyMeta = new Map<string, { modelId: string; provider: string; scope?: string }>()
 
   constructor(config: RateLimiterConfig) {
     this.config = config
@@ -106,10 +107,6 @@ export class Pipeline {
       }
     }
   }
-
-  // -------------------------------------------------------------------------
-  // execute — called by both generate and stream adapters
-  // -------------------------------------------------------------------------
 
   // -------------------------------------------------------------------------
   // Scope resolution helpers
@@ -157,37 +154,75 @@ export class Pipeline {
       : this.resolveModelLimits(modelId, provider)
     const estimatedInput = estimateInputTokens(prompt)
     const key = scope ? `${scope}:${provider}:${modelId}` : `${provider}:${modelId}`
+
+    // Track key → metadata for getStatus() — avoids fragile string parsing of scoped keys
+    if (!this.keyMeta.has(key)) {
+      this.keyMeta.set(key, { modelId, provider, ...(scope !== undefined && { scope }) })
+    }
+
     let slotAcquired = false
 
     // -----------------------------------------------------------------------
     // 1. Budget pre-check
     // -----------------------------------------------------------------------
     if (this.config.cost?.budget && !opts.skipBudgetCheck) {
+      const budget = this.config.cost.budget
+      const onExceeded = this.config.cost.onExceeded ?? 'throw'
       const estimatedCost = this.costTracker.estimateCost(
         estimatedInput,
         500, // conservative output estimate for pre-check
         limits.inputPricePerMillion,
         limits.outputPricePerMillion,
       )
-      try {
-        this.costTracker.checkBudget(
-          modelId,
-          estimatedCost,
-          this.config.cost.budget,
-          this.config.cost.onExceeded ?? 'throw',
-        )
-      } catch (err) {
-        if (err instanceof BudgetExceededError) {
-          this.emitter.emit('budgetHit', {
-            model: err.model,
-            provider,
-            currentCostUsd: err.currentCostUsd,
-            limitUsd: err.limitUsd,
-            period: err.period,
-            usingFallback: false,
-          })
+
+      if (onExceeded === 'queue') {
+        // Hold the request until the rolling cost window clears enough capacity.
+        // Uses the queue timeout as the maximum wait duration.
+        const deadlineMs = Date.now() + opts.timeoutMs
+        while (true) {
+          try {
+            // Re-use 'throw' mode internally to get the BudgetExceededError payload
+            this.costTracker.checkBudget(modelId, estimatedCost, budget, 'throw')
+            break // budget ok — proceed
+          } catch (err) {
+            if (!(err instanceof BudgetExceededError)) throw err
+
+            this.emitter.emit('budgetHit', {
+              model: err.model,
+              provider,
+              currentCostUsd: err.currentCostUsd,
+              limitUsd: err.limitUsd,
+              period: err.period,
+              usingFallback: false,
+            })
+
+            const clearAtMs = this.costTracker.nextBudgetClearMs(budget, estimatedCost)
+            const waitMs = Math.max(50, Math.min(clearAtMs - Date.now(), deadlineMs - Date.now()))
+
+            if (Date.now() + waitMs > deadlineMs) {
+              throw new QueueTimeoutError(modelId, opts.timeoutMs, 0)
+            }
+
+            await new Promise<void>(resolve => setTimeout(resolve, waitMs))
+          }
         }
-        throw err
+      } else {
+        // 'throw' or 'fallback' — raise immediately on budget hit
+        try {
+          this.costTracker.checkBudget(modelId, estimatedCost, budget, onExceeded)
+        } catch (err) {
+          if (err instanceof BudgetExceededError) {
+            this.emitter.emit('budgetHit', {
+              model: err.model,
+              provider,
+              currentCostUsd: err.currentCostUsd,
+              limitUsd: err.limitUsd,
+              period: err.period,
+              usingFallback: false,
+            })
+          }
+          throw err
+        }
       }
     }
 
@@ -323,10 +358,12 @@ export class Pipeline {
     let totalQueueDepth = 0
 
     for (const key of this.engine.knownKeys()) {
-      // Key format: "provider:modelId" or "scope:provider:modelId"
-      const colonIdx = key.indexOf(':')
-      const provider = colonIdx !== -1 ? key.slice(0, colonIdx) : key
-      const modelId = colonIdx !== -1 ? key.slice(colonIdx + 1) : key
+      // Use stored metadata to avoid fragile string-splitting of scoped keys.
+      // Scoped keys look like "scope:provider:modelId" where scope itself may
+      // contain colons (e.g. "user:free:123"), making indexOf-based parsing wrong.
+      const meta = this.keyMeta.get(key)
+      const provider = meta?.provider ?? key
+      const modelId = meta?.modelId ?? key
 
       const snapshot = this.engine.windowSnapshot(key)
       const queueDepth = this.engine.queueDepth(key)
@@ -348,11 +385,31 @@ export class Pipeline {
     return { models, totalQueueDepth }
   }
 
-  async estimatedWait(modelId: string, provider: string, priority: Priority = 'normal', scope?: string): Promise<number> {
-    const key = scope ? `${scope}:${provider}:${modelId}` : `${provider}:${modelId}`
+  async estimatedWait(
+    modelId: string,
+    provider: string,
+    priority: Priority = 'normal',
+    scope?: string,
+  ): Promise<number> {
+    // When provider is not known at the call site (public API passes ''),
+    // scan stored keys to find the provider that has served this modelId.
+    let resolvedProvider = provider
+    if (!resolvedProvider) {
+      for (const [key, meta] of this.keyMeta) {
+        if (meta.modelId === modelId && !meta.scope) {
+          resolvedProvider = meta.provider
+          break
+        }
+      }
+      if (!resolvedProvider) return 0 // no requests seen yet → no wait
+    }
+
+    const key = scope
+      ? `${scope}:${resolvedProvider}:${modelId}`
+      : `${resolvedProvider}:${modelId}`
     const limits = scope
-      ? this.resolveScopedLimits(modelId, provider, scope)
-      : this.resolveModelLimits(modelId, provider)
+      ? this.resolveScopedLimits(modelId, resolvedProvider, scope)
+      : this.resolveModelLimits(modelId, resolvedProvider)
     return this.engine.estimatedWaitMs(key, limits)
   }
 

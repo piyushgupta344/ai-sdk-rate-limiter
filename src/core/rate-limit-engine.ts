@@ -112,11 +112,19 @@ export class RateLimitEngine {
 
     const local = this.getOrCreate(key)
 
-    const nextSlotAtMs = await this.store.checkAndRecord(
-      key,
-      opts.estimatedInputTokens,
-      opts.limits,
-    )
+    let nextSlotAtMs: number
+    try {
+      nextSlotAtMs = await this.store.checkAndRecord(
+        key,
+        opts.estimatedInputTokens,
+        opts.limits,
+      )
+    } catch {
+      // Store unavailable (e.g. Redis connection lost) — fail open so AI
+      // requests continue working. Rate limit enforcement is suspended until
+      // the store recovers.
+      nextSlotAtMs = 0
+    }
 
     if (nextSlotAtMs > Date.now()) {
       // Rate limited — queue the request
@@ -296,11 +304,16 @@ export class RateLimitEngine {
 
     while (local.waiters.length > 0) {
       const waiter = local.waiters[0]!
-      const nextSlotAtMs = await this.store.checkAndRecord(
-        key,
-        waiter.estimatedInputTokens,
-        limits,
-      )
+      let nextSlotAtMs: number
+      try {
+        nextSlotAtMs = await this.store.checkAndRecord(
+          key,
+          waiter.estimatedInputTokens,
+          limits,
+        )
+      } catch {
+        nextSlotAtMs = 0 // store unavailable — fail open
+      }
 
       if (nextSlotAtMs > Date.now()) {
         // Still rate-limited — reschedule

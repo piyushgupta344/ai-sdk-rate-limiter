@@ -56,14 +56,21 @@ class MockRedis implements RedisClient {
   }
 
   private runCheckAndRecord(args: Array<string | number>): number {
+    // KEYS: args[0]=windowKey, args[1]=backoffKey, args[2]=dailyKey
+    // ARGV: args[3]=now, [4]=windowMs, [5]=rpm, [6]=itpm, [7]=estInput,
+    //       [8]=memberId, [9]=otpm, [10]=rpd
     const windowKey = String(args[0])
     const backoffKey = String(args[1])
-    const now = Number(args[2])
-    const windowMs = Number(args[3])
-    const rpmLimit = Number(args[4])
-    const itpmLimit = Number(args[5])
-    const estInput = Number(args[6])
-    const memberId = String(args[7])
+    const dailyKey  = String(args[2])
+    const now       = Number(args[3])
+    const windowMs  = Number(args[4])
+    const rpmLimit  = Number(args[5])
+    const itpmLimit = Number(args[6])
+    const estInput  = Number(args[7])
+    const memberId  = String(args[8])
+    const otpmLimit = Number(args[9])
+    const rpdLimit  = Number(args[10])
+    const dayMs     = 86_400_000
 
     // Check backoff
     const backoffVal = this.getString(backoffKey)
@@ -72,7 +79,7 @@ class MockRedis implements RedisClient {
       if (until > now) return until
     }
 
-    // Get/evict sorted set
+    // Get/evict minute sorted set
     const entries = this.getSortedSet(windowKey)
     const cutoff = now - windowMs
     const active = entries.filter(e => e.score > cutoff)
@@ -80,9 +87,11 @@ class MockRedis implements RedisClient {
 
     const reqCount = active.length
     let inputSum = 0
+    let outputSum = 0
     for (const e of active) {
-      const inp = Number(e.member.match(/^(\d+):/)?.[1] ?? 0)
-      inputSum += inp
+      const m = e.member.match(/^(\d+):(\d+):/)
+      inputSum  += Number(m?.[1] ?? 0)
+      outputSum += Number(m?.[2] ?? 0)
     }
 
     // RPM check
@@ -95,11 +104,30 @@ class MockRedis implements RedisClient {
     if (itpmLimit > 0 && inputSum + estInput > itpmLimit) {
       let running = inputSum
       for (const e of active) {
-        const inp = Number(e.member.match(/^(\d+):/)?.[1] ?? 0)
-        running -= inp
+        running -= Number(e.member.match(/^(\d+):/)?.[1] ?? 0)
         if (running + estInput <= itpmLimit) {
           return e.score + windowMs + 1
         }
+      }
+      return now + windowMs + 1
+    }
+
+    // RPD check
+    if (rpdLimit > 0) {
+      const daily = this.getSortedSet(dailyKey)
+      const activeDaily = daily.filter(e => e.score > now - dayMs)
+      this.sortedSets.set(dailyKey, activeDaily)
+      if (activeDaily.length >= rpdLimit) {
+        return (activeDaily[0]?.score ?? now) + dayMs + 1
+      }
+    }
+
+    // OTPM check
+    if (otpmLimit > 0 && outputSum >= otpmLimit) {
+      let running = outputSum
+      for (const e of active) {
+        running -= Number(e.member.match(/^\d+:(\d+):/)?.[1] ?? 0)
+        if (running < otpmLimit) return e.score + windowMs + 1
       }
       return now + windowMs + 1
     }
@@ -108,6 +136,13 @@ class MockRedis implements RedisClient {
     active.push({ score: now, member: `${estInput}:0:${memberId}` })
     active.sort((a, b) => a.score - b.score)
     this.sortedSets.set(windowKey, active)
+
+    if (rpdLimit > 0) {
+      const daily = this.getSortedSet(dailyKey)
+      daily.push({ score: now, member: memberId })
+      this.sortedSets.set(dailyKey, daily)
+    }
+
     return 0
   }
 
@@ -131,13 +166,19 @@ class MockRedis implements RedisClient {
   }
 
   private runNextSlot(args: Array<string | number>): number {
+    // KEYS: args[0]=windowKey, args[1]=backoffKey, args[2]=dailyKey
+    // ARGV: args[3]=now, [4]=windowMs, [5]=rpm, [6]=itpm, [7]=estInput, [8]=otpm, [9]=rpd
     const windowKey = String(args[0])
     const backoffKey = String(args[1])
-    const now = Number(args[2])
-    const windowMs = Number(args[3])
-    const rpmLimit = Number(args[4])
-    const itpmLimit = Number(args[5])
-    const estInput = Number(args[6])
+    const dailyKey  = String(args[2])
+    const now       = Number(args[3])
+    const windowMs  = Number(args[4])
+    const rpmLimit  = Number(args[5])
+    const itpmLimit = Number(args[6])
+    const estInput  = Number(args[7])
+    const otpmLimit = Number(args[8])
+    const rpdLimit  = Number(args[9])
+    const dayMs     = 86_400_000
 
     const backoffVal = this.getString(backoffKey)
     if (backoffVal) {
@@ -149,23 +190,51 @@ class MockRedis implements RedisClient {
     const active = entries.filter(e => e.score > now - windowMs)
     const reqCount = active.length
     let inputSum = 0
+    let outputSum = 0
     for (const e of active) {
-      inputSum += Number(e.member.match(/^(\d+):/)?.[1] ?? 0)
+      inputSum  += Number(e.member.match(/^(\d+):/)?.[1] ?? 0)
+      outputSum += Number(e.member.match(/^\d+:(\d+):/)?.[1] ?? 0)
     }
 
-    const rpmOk = rpmLimit === 0 || reqCount < rpmLimit
+    // RPD check
+    let rpdBlocked = false
+    let rpdNextSlot = now
+    if (rpdLimit > 0) {
+      const daily = this.getSortedSet(dailyKey)
+      const activeDaily = daily.filter(e => e.score > now - dayMs)
+      if (activeDaily.length >= rpdLimit) {
+        rpdBlocked = true
+        rpdNextSlot = (activeDaily[0]?.score ?? now) + dayMs + 1
+      }
+    }
+
+    const rpmOk  = rpmLimit === 0 || reqCount < rpmLimit
     const itpmOk = itpmLimit === 0 || inputSum + estInput <= itpmLimit
-    if (rpmOk && itpmOk) return 0
+    const otpmOk = otpmLimit === 0 || outputSum < otpmLimit
+    if (rpmOk && itpmOk && otpmOk && !rpdBlocked) return 0
 
     let nextSlot = now
-    if (rpmLimit > 0 && reqCount >= rpmLimit && active[0]) {
+    if (!rpmOk && active[0]) {
       nextSlot = Math.max(nextSlot, active[0].score + windowMs + 1)
     }
-    if (itpmLimit > 0 && inputSum + estInput > itpmLimit) {
+    if (!itpmOk) {
       let running = inputSum
       for (const e of active) {
         running -= Number(e.member.match(/^(\d+):/)?.[1] ?? 0)
         if (running + estInput <= itpmLimit) {
+          nextSlot = Math.max(nextSlot, e.score + windowMs + 1)
+          break
+        }
+      }
+    }
+    if (rpdBlocked) {
+      nextSlot = Math.max(nextSlot, rpdNextSlot)
+    }
+    if (!otpmOk) {
+      let running = outputSum
+      for (const e of active) {
+        running -= Number(e.member.match(/^\d+:(\d+):/)?.[1] ?? 0)
+        if (running < otpmLimit) {
           nextSlot = Math.max(nextSlot, e.score + windowMs + 1)
           break
         }

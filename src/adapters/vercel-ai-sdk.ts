@@ -185,19 +185,33 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
 
       const { stream, ...rest } = streamResult
 
-      // Intercept the stream to capture the 'finish' chunk usage
+      // Intercept the stream to capture the 'finish' chunk usage.
+      // The flush() callback fires on clean close — it handles the case where
+      // the stream ends without a finish chunk (some providers, or errors).
+      let usageRecorded = false
       const transformStream = new TransformStream<
         LanguageModelV4StreamPart,
         LanguageModelV4StreamPart
       >({
         transform(chunk, controller) {
           if (chunk.type === 'finish') {
+            usageRecorded = true
             const usage = chunk.usage
               ? extractTokenUsage(chunk.usage as LanguageModelV4GenerateResult['usage'])
               : { inputTokens: 0, outputTokens: 0 }
             pipeline.recordUsage(modelId, provider, scope, usage, Date.now() - startMs, true)
           }
           controller.enqueue(chunk)
+        },
+        flush() {
+          if (!usageRecorded) {
+            pipeline.recordUsage(
+              modelId, provider, scope,
+              { inputTokens: 0, outputTokens: 0 },
+              Date.now() - startMs,
+              true,
+            )
+          }
         },
       })
 

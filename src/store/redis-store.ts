@@ -50,12 +50,15 @@ export interface RedisClient {
  *
  * KEYS[1]  sorted set: "rl:{key}:window"
  * KEYS[2]  backoff key: "rl:{key}:backoff"
+ * KEYS[3]  daily sorted set: "rl:{key}:daily"
  * ARGV[1]  now (ms)
  * ARGV[2]  windowMs (60000)
  * ARGV[3]  rpm limit (0 = unlimited)
  * ARGV[4]  itpm limit (0 = unlimited)
  * ARGV[5]  estimatedInputTokens
  * ARGV[6]  unique member ID for this request
+ * ARGV[7]  otpm limit (0 = unlimited)
+ * ARGV[8]  rpd limit (0 = unlimited)
  *
  * Returns: number (0 = allowed, >0 = nextSlotAtMs)
  */
@@ -66,6 +69,9 @@ local rpmLimit   = tonumber(ARGV[3])
 local itpmLimit  = tonumber(ARGV[4])
 local estInput   = tonumber(ARGV[5])
 local memberId   = ARGV[6]
+local otpmLimit  = tonumber(ARGV[7])
+local rpdLimit   = tonumber(ARGV[8])
+local dayMs      = 86400000
 
 -- Respect a server-issued backoff
 local backoffVal = redis.call('GET', KEYS[2])
@@ -76,18 +82,20 @@ if backoffVal then
   end
 end
 
--- Evict entries outside the window
+-- Evict entries outside the minute window
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - windowMs)
 
--- Gather all remaining members
-local members = redis.call('ZRANGE', KEYS[1], 0, -1)
-local reqCount = #members
+-- Gather all remaining members and sum tokens
+local members   = redis.call('ZRANGE', KEYS[1], 0, -1)
+local reqCount  = #members
 local inputSum  = 0
+local outputSum = 0
 
 for _, m in ipairs(members) do
   -- member format: "inputTokens:outputTokens:id"
-  local inp = tonumber(m:match('^(%d+):'))
-  if inp then inputSum = inputSum + inp end
+  local inp, out = m:match('^(%d+):(%d+):')
+  if inp then inputSum  = inputSum  + tonumber(inp) end
+  if out then outputSum = outputSum + tonumber(out) end
 end
 
 -- RPM check
@@ -112,10 +120,42 @@ if itpmLimit > 0 and inputSum + estInput > itpmLimit then
   return now + windowMs + 1
 end
 
--- Reserve slot
+-- RPD check (daily request limit)
+if rpdLimit > 0 then
+  redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now - dayMs)
+  local dailyCount = redis.call('ZCARD', KEYS[3])
+  if dailyCount >= rpdLimit then
+    local oldest = redis.call('ZRANGE', KEYS[3], 0, 0, 'WITHSCORES')
+    local oldestTs = tonumber(oldest[2] or now)
+    return oldestTs + dayMs + 1
+  end
+end
+
+-- OTPM check (output tokens per minute, based on completed requests)
+if otpmLimit > 0 and outputSum >= otpmLimit then
+  local withScores = redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')
+  local running = outputSum
+  for i = 1, #withScores, 2 do
+    local out = tonumber(withScores[i]:match('^%d+:(%d+):')) or 0
+    local ts  = tonumber(withScores[i+1])
+    running = running - out
+    if running < otpmLimit then
+      return ts + windowMs + 1
+    end
+  end
+  return now + windowMs + 1
+end
+
+-- Reserve slot in minute window
 local member = estInput .. ':0:' .. memberId
 redis.call('ZADD', KEYS[1], now, member)
 redis.call('PEXPIRE', KEYS[1], windowMs + 5000)
+
+-- Reserve slot in daily window (if RPD is configured)
+if rpdLimit > 0 then
+  redis.call('ZADD', KEYS[3], now, memberId)
+  redis.call('PEXPIRE', KEYS[3], dayMs + 5000)
+end
 
 return 0
 `
@@ -157,11 +197,14 @@ return 0
  *
  * KEYS[1]  sorted set
  * KEYS[2]  backoff key
+ * KEYS[3]  daily sorted set
  * ARGV[1]  now (ms)
  * ARGV[2]  windowMs
  * ARGV[3]  rpmLimit
  * ARGV[4]  itpmLimit
  * ARGV[5]  estimatedInputTokens
+ * ARGV[6]  otpmLimit
+ * ARGV[7]  rpdLimit
  */
 const LUA_NEXT_SLOT = `
 local now       = tonumber(ARGV[1])
@@ -169,6 +212,9 @@ local windowMs  = tonumber(ARGV[2])
 local rpmLimit  = tonumber(ARGV[3])
 local itpmLimit = tonumber(ARGV[4])
 local estInput  = tonumber(ARGV[5])
+local otpmLimit = tonumber(ARGV[6])
+local rpdLimit  = tonumber(ARGV[7])
+local dayMs     = 86400000
 
 local backoffVal = redis.call('GET', KEYS[2])
 if backoffVal then
@@ -178,23 +224,39 @@ end
 
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - windowMs)
 
-local members  = redis.call('ZRANGE', KEYS[1], 0, -1)
-local reqCount = #members
-local inputSum = 0
+local members   = redis.call('ZRANGE', KEYS[1], 0, -1)
+local reqCount  = #members
+local inputSum  = 0
+local outputSum = 0
 
 for _, m in ipairs(members) do
-  local inp = tonumber(m:match('^(%d+):'))
-  if inp then inputSum = inputSum + inp end
+  local inp, out = m:match('^(%d+):(%d+):')
+  if inp then inputSum  = inputSum  + tonumber(inp) end
+  if out then outputSum = outputSum + tonumber(out) end
+end
+
+-- Check RPD availability
+local rpdBlocked = false
+local rpdNextSlot = now
+if rpdLimit > 0 then
+  redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now - dayMs)
+  local dailyCount = redis.call('ZCARD', KEYS[3])
+  if dailyCount >= rpdLimit then
+    rpdBlocked = true
+    local oldest = redis.call('ZRANGE', KEYS[3], 0, 0, 'WITHSCORES')
+    rpdNextSlot = tonumber(oldest[2] or now) + dayMs + 1
+  end
 end
 
 -- Available now?
 local rpmOk  = rpmLimit == 0 or reqCount < rpmLimit
 local itpmOk = itpmLimit == 0 or inputSum + estInput <= itpmLimit
-if rpmOk and itpmOk then return 0 end
+local otpmOk = otpmLimit == 0 or outputSum < otpmLimit
+if rpmOk and itpmOk and otpmOk and not rpdBlocked then return 0 end
 
 local nextSlot = now
 
-if rpmLimit > 0 and reqCount >= rpmLimit then
+if not rpmOk then
   local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
   local oldestTs = tonumber(oldest[2] or now)
   if oldestTs + windowMs + 1 > nextSlot then
@@ -202,7 +264,7 @@ if rpmLimit > 0 and reqCount >= rpmLimit then
   end
 end
 
-if itpmLimit > 0 and inputSum + estInput > itpmLimit then
+if not itpmOk then
   local withScores = redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')
   local running = inputSum
   for i = 1, #withScores, 2 do
@@ -210,6 +272,25 @@ if itpmLimit > 0 and inputSum + estInput > itpmLimit then
     local ts  = tonumber(withScores[i+1])
     running = running - inp
     if running + estInput <= itpmLimit then
+      local candidate = ts + windowMs + 1
+      if candidate > nextSlot then nextSlot = candidate end
+      break
+    end
+  end
+end
+
+if rpdBlocked and rpdNextSlot > nextSlot then
+  nextSlot = rpdNextSlot
+end
+
+if not otpmOk then
+  local withScores = redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')
+  local running = outputSum
+  for i = 1, #withScores, 2 do
+    local out = tonumber(withScores[i]:match('^%d+:(%d+):')) or 0
+    local ts  = tonumber(withScores[i+1])
+    running = running - out
+    if running < otpmLimit then
       local candidate = ts + windowMs + 1
       if candidate > nextSlot then nextSlot = candidate end
       break
@@ -258,15 +339,18 @@ export class RedisStore implements RateLimitStore {
     const memberId = `${Date.now()}_${++_counter}`
     const result = await this.redis.eval(
       LUA_CHECK_AND_RECORD,
-      2,
+      3,
       this.windowKey(key),
       this.backoffKey(key),
+      this.dailyKey(key),
       Date.now(),
       this.windowMs,
       limits.rpm,
       limits.itpm ?? 0,
       estimatedInputTokens,
       memberId,
+      limits.otpm ?? 0,
+      limits.rpd ?? 0,
     )
     return Number(result)
   }
@@ -302,14 +386,17 @@ export class RedisStore implements RateLimitStore {
   ): Promise<number> {
     const result = await this.redis.eval(
       LUA_NEXT_SLOT,
-      2,
+      3,
       this.windowKey(key),
       this.backoffKey(key),
+      this.dailyKey(key),
       Date.now(),
       this.windowMs,
       limits.rpm,
       limits.itpm ?? 0,
       estimatedInputTokens,
+      limits.otpm ?? 0,
+      limits.rpd ?? 0,
     )
     return Number(result)
   }
@@ -324,5 +411,9 @@ export class RedisStore implements RateLimitStore {
 
   private backoffKey(key: string): string {
     return `${this.prefix}${key}:backoff`
+  }
+
+  private dailyKey(key: string): string {
+    return `${this.prefix}${key}:daily`
   }
 }

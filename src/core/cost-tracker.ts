@@ -84,6 +84,44 @@ export class CostTracker {
     return costUsd
   }
 
+  /**
+   * Returns the soonest timestamp (ms) at which the rolling cost windows will
+   * clear enough to allow a request costing `neededCostUsd`.
+   * Used by the pipeline to schedule the re-check in 'queue' budget mode.
+   */
+  nextBudgetClearMs(budget: BudgetPeriod, neededCostUsd: number): number {
+    const now = Date.now()
+    this.evict(now)
+
+    const periods: Array<{ limit: number; windowMs: number }> = []
+    if (budget.hourly !== undefined) periods.push({ limit: budget.hourly, windowMs: HOUR_MS })
+    if (budget.daily !== undefined) periods.push({ limit: budget.daily, windowMs: DAY_MS })
+    if (budget.monthly !== undefined) periods.push({ limit: budget.monthly, windowMs: MONTH_MS })
+
+    let earliest = now + MONTH_MS
+
+    for (const { limit, windowMs } of periods) {
+      const spent = this.entries
+        .filter(e => e.timestamp > now - windowMs)
+        .reduce((s, e) => s + e.costUsd, 0)
+
+      if (spent + neededCostUsd <= limit) continue // this period is fine
+
+      // Walk entries oldest-first; find when enough ages out to clear the cap
+      let accumulated = spent
+      for (const entry of this.entries) {
+        if (entry.timestamp <= now - windowMs) continue
+        accumulated -= entry.costUsd
+        if (accumulated + neededCostUsd <= limit) {
+          earliest = Math.min(earliest, entry.timestamp + windowMs)
+          break
+        }
+      }
+    }
+
+    return earliest
+  }
+
   estimateCost(
     inputTokens: number,
     outputTokens: number,
