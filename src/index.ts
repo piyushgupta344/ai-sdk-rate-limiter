@@ -37,6 +37,7 @@ export type {
   RateLimiterConfig,
   ModelLimits,
   ModelLimitOverride,
+  ScopeConfig,
   CostConfig,
   BudgetPeriod,
   BudgetExceededAction,

@@ -313,10 +313,7 @@ describe('rawProxy — provider auto-detection', () => {
 
     await proxied.completions.create({ model: 'llama-3.3-70b-versatile', messages: [] })
 
-    // completed fires twice per call: once from execute() (estimated 0 tokens),
-    // once from recordUsage() with actuals
-    expect(onCompleted).toHaveBeenCalledTimes(2)
-    // Both events should carry the correct provider
+    expect(onCompleted).toHaveBeenCalledTimes(1)
     expect(onCompleted.mock.calls.every((c: unknown[]) => (c[0] as Record<string, unknown>)['provider'] === 'groq')).toBe(true)
   })
 })
@@ -366,10 +363,7 @@ describe('rawProxy — budget enforcement', () => {
     await client.chat.completions.create({ model: 'gpt-4o', messages: [] })
     await client.chat.completions.create({ model: 'gpt-4o-mini', messages: [] })
 
-    // Two completed events from execute() + two from recordUsage()
-    // Each call fires once from pipeline.execute and once from recordUsage
-    // Actually pipeline.execute fires once (with 0/0), then recordUsage fires again with actuals
-    expect(onCompleted).toHaveBeenCalledTimes(4)
+    expect(onCompleted).toHaveBeenCalledTimes(2)
   })
 })
 

@@ -41,7 +41,7 @@ export function createRateLimiter(config: RateLimiterConfig = {}): RateLimiter {
   return {
     wrap(
       model: WrappableModel,
-      options?: { modelId?: string; providerId?: string; fallback?: WrappableModel },
+      options?: { modelId?: string; providerId?: string; fallback?: WrappableModel; scope?: string },
     ): WrappableModel {
       return wrapModel(model, middleware, options)
     },

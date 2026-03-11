@@ -30,6 +30,7 @@ export interface LanguageModelV4CallOptions {
   prompt: unknown
   maxOutputTokens?: number
   providerOptions?: Record<string, unknown>
+  abortSignal?: AbortSignal
   [key: string]: unknown
 }
 
@@ -87,13 +88,20 @@ export interface Middleware {
 function getPerRequestOptions(
   params: LanguageModelV4CallOptions,
   queueTimeout: number,
-): { priority: Priority; timeoutMs: number; metadata: Record<string, unknown>; skipBudgetCheck: boolean } {
+): {
+  priority: Priority
+  timeoutMs: number
+  metadata: Record<string, unknown>
+  skipBudgetCheck: boolean
+  scope: string | undefined
+} {
   const raw = params.providerOptions?.['rateLimiter'] as (PerRequestOptions & { _skipBudgetCheck?: boolean }) | undefined
   return {
     priority: raw?.priority ?? 'normal',
     timeoutMs: raw?.timeout ?? queueTimeout,
     metadata: raw?.metadata ?? {},
     skipBudgetCheck: raw?._skipBudgetCheck ?? false,
+    scope: raw?.scope,
   }
 }
 
@@ -123,12 +131,11 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
     // wrapGenerate — non-streaming
     // -----------------------------------------------------------------------
     async wrapGenerate({ doGenerate, params, model }) {
-      const { priority, timeoutMs, skipBudgetCheck } = getPerRequestOptions(params, queueTimeout)
+      const { priority, timeoutMs, skipBudgetCheck, scope } = getPerRequestOptions(params, queueTimeout)
       const modelId = model.modelId
       const provider = model.provider
       const startMs = Date.now()
 
-      // Run through the full pipeline: budget → acquire → retry
       const result = await pipeline.execute(
         modelId,
         provider,
@@ -139,17 +146,15 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
           priority,
           timeoutMs,
           skipBudgetCheck,
-          onUsage: () => {
-            // placeholder — we reconcile with actuals below
-          },
+          ...(scope !== undefined && { scope }),
+          ...(params.abortSignal !== undefined && { signal: params.abortSignal }),
         },
       )
 
-      // Reconcile with actual usage from the API response
-      if (result.usage) {
-        const usage = extractTokenUsage(result.usage)
-        pipeline.recordUsage(modelId, provider, usage, Date.now() - startMs, false)
-      }
+      const usage = result.usage
+        ? extractTokenUsage(result.usage)
+        : { inputTokens: 0, outputTokens: 0 }
+      pipeline.recordUsage(modelId, provider, scope, usage, Date.now() - startMs, false)
 
       return result
     },
@@ -158,12 +163,11 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
     // wrapStream — streaming
     // -----------------------------------------------------------------------
     async wrapStream({ doStream, params, model }) {
-      const { priority, timeoutMs, skipBudgetCheck } = getPerRequestOptions(params, queueTimeout)
+      const { priority, timeoutMs, skipBudgetCheck, scope } = getPerRequestOptions(params, queueTimeout)
       const modelId = model.modelId
       const provider = model.provider
       const startMs = Date.now()
 
-      // Run through pipeline for the initial request
       const streamResult = await pipeline.execute(
         modelId,
         provider,
@@ -174,7 +178,8 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
           priority,
           timeoutMs,
           skipBudgetCheck,
-          onUsage: () => {},
+          ...(scope !== undefined && { scope }),
+          ...(params.abortSignal !== undefined && { signal: params.abortSignal }),
         },
       )
 
@@ -186,12 +191,11 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
         LanguageModelV4StreamPart
       >({
         transform(chunk, controller) {
-          // Capture usage from the finish event
-          if (chunk.type === 'finish' && chunk.usage) {
-            const usage = extractTokenUsage(
-              chunk.usage as LanguageModelV4GenerateResult['usage'],
-            )
-            pipeline.recordUsage(modelId, provider, usage, Date.now() - startMs, true)
+          if (chunk.type === 'finish') {
+            const usage = chunk.usage
+              ? extractTokenUsage(chunk.usage as LanguageModelV4GenerateResult['usage'])
+              : { inputTokens: 0, outputTokens: 0 }
+            pipeline.recordUsage(modelId, provider, scope, usage, Date.now() - startMs, true)
           }
           controller.enqueue(chunk)
         },
@@ -215,11 +219,26 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
 export function wrapModel(
   model: WrappableModel,
   middleware: Middleware,
-  overrides?: { modelId?: string; providerId?: string; fallback?: WrappableModel },
+  overrides?: { modelId?: string; providerId?: string; fallback?: WrappableModel; scope?: string },
 ): WrappableModel {
   const providerId = overrides?.providerId ?? model.provider
   const modelId = overrides?.modelId ?? model.modelId
   const fallbackModel = overrides?.fallback
+  const staticScope = overrides?.scope
+
+  // Inject static scope into params if no per-request scope is set
+  function injectScope(params: LanguageModelV4CallOptions): LanguageModelV4CallOptions {
+    if (!staticScope) return params
+    const existingRl = (params.providerOptions?.['rateLimiter'] as Record<string, unknown>) ?? {}
+    if (existingRl['scope']) return params // per-request scope takes precedence
+    return {
+      ...params,
+      providerOptions: {
+        ...params.providerOptions,
+        rateLimiter: { ...existingRl, scope: staticScope },
+      },
+    }
+  }
 
   return {
     specificationVersion: 'v4' as const,
@@ -228,21 +247,22 @@ export function wrapModel(
     supportedUrls: (model as unknown as Record<string, unknown>)['supportedUrls'],
 
     async doGenerate(params: LanguageModelV4CallOptions): Promise<LanguageModelV4GenerateResult> {
+      const enrichedParams = injectScope(params)
       try {
         return await middleware.wrapGenerate({
-          doGenerate: () => model.doGenerate(params),
-          doStream: () => model.doStream(params),
-          params,
+          doGenerate: () => model.doGenerate(enrichedParams),
+          doStream: () => model.doStream(enrichedParams),
+          params: enrichedParams,
           model,
         })
       } catch (err) {
         if (err instanceof BudgetExceededError && fallbackModel) {
           const fallbackParams = {
-            ...params,
+            ...enrichedParams,
             providerOptions: {
-              ...params.providerOptions,
+              ...enrichedParams.providerOptions,
               rateLimiter: {
-                ...((params.providerOptions?.['rateLimiter'] as Record<string, unknown>) ?? {}),
+                ...((enrichedParams.providerOptions?.['rateLimiter'] as Record<string, unknown>) ?? {}),
                 _skipBudgetCheck: true,
               },
             },
@@ -259,21 +279,22 @@ export function wrapModel(
     },
 
     async doStream(params: LanguageModelV4CallOptions): Promise<LanguageModelV4StreamResult> {
+      const enrichedParams = injectScope(params)
       try {
         return await middleware.wrapStream({
-          doGenerate: () => model.doGenerate(params),
-          doStream: () => model.doStream(params),
-          params,
+          doGenerate: () => model.doGenerate(enrichedParams),
+          doStream: () => model.doStream(enrichedParams),
+          params: enrichedParams,
           model,
         })
       } catch (err) {
         if (err instanceof BudgetExceededError && fallbackModel) {
           const fallbackParams = {
-            ...params,
+            ...enrichedParams,
             providerOptions: {
-              ...params.providerOptions,
+              ...enrichedParams.providerOptions,
               rateLimiter: {
-                ...((params.providerOptions?.['rateLimiter'] as Record<string, unknown>) ?? {}),
+                ...((enrichedParams.providerOptions?.['rateLimiter'] as Record<string, unknown>) ?? {}),
                 _skipBudgetCheck: true,
               },
             },

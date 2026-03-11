@@ -22,6 +22,14 @@ interface LocalState {
   waiters: Waiter[]
   /** True while a drain is running or a drain timer is active */
   drainScheduled: boolean
+  /** Number of requests currently executing (for maxConcurrent enforcement) */
+  activeCount: number
+  /** Waiters blocked on the concurrency limit (not the rate limit window) */
+  concurrencyWaiters: Array<{ resolve: () => void; reject: (e: Error) => void }>
+}
+
+function makeAbortError(): Error {
+  return Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +93,7 @@ export class RateLimitEngine {
    * - If at capacity: enqueues (sorted by priority) and resolves when a slot opens.
    * - If queue is full: throws QueueFullError immediately.
    * - If waiting exceeds timeoutMs: throws QueueTimeoutError.
+   * - If signal is aborted while queued: throws an AbortError.
    */
   async acquire(
     key: string,
@@ -93,10 +102,14 @@ export class RateLimitEngine {
       estimatedInputTokens: number
       priority: Priority
       timeoutMs: number
+      signal?: AbortSignal
       onQueued?: (queueDepth: number, estimatedWaitMs: number) => void
       onDequeued?: (waitedMs: number) => void
     },
   ): Promise<void> {
+    // Fail fast if already aborted before we even try
+    if (opts.signal?.aborted) throw makeAbortError()
+
     const local = this.getOrCreate(key)
 
     const nextSlotAtMs = await this.store.checkAndRecord(
@@ -105,40 +118,82 @@ export class RateLimitEngine {
       opts.limits,
     )
 
-    if (nextSlotAtMs <= Date.now()) return // slot acquired immediately
-
-    // Rate limited — queue the request
-    if (local.waiters.length >= this.maxQueueSize) {
-      throw new QueueFullError(key, this.maxQueueSize)
-    }
-
-    const estimatedWaitMs = Math.max(0, nextSlotAtMs - Date.now())
-    opts.onQueued?.(local.waiters.length, estimatedWaitMs)
-
-    return new Promise<void>((resolve, reject) => {
-      const enqueuedAt = Date.now()
-
-      const timeoutHandle = setTimeout(() => {
-        const idx = local.waiters.indexOf(waiter)
-        if (idx !== -1) local.waiters.splice(idx, 1)
-        reject(new QueueTimeoutError(key, Date.now() - enqueuedAt, local.waiters.length))
-      }, opts.timeoutMs)
-
-      const waiter: Waiter = {
-        resolve: () => {
-          opts.onDequeued?.(Date.now() - enqueuedAt)
-          resolve()
-        },
-        reject,
-        priority: opts.priority,
-        enqueued: enqueuedAt,
-        estimatedInputTokens: opts.estimatedInputTokens,
-        timeoutHandle,
+    if (nextSlotAtMs > Date.now()) {
+      // Rate limited — queue the request
+      if (local.waiters.length >= this.maxQueueSize) {
+        throw new QueueFullError(key, this.maxQueueSize)
       }
 
-      insertWaiter(local.waiters, waiter)
-      this.scheduleDrain(key, opts.limits, nextSlotAtMs)
-    })
+      const estimatedWaitMs = Math.max(0, nextSlotAtMs - Date.now())
+      opts.onQueued?.(local.waiters.length, estimatedWaitMs)
+
+      await new Promise<void>((resolve, reject) => {
+        const enqueuedAt = Date.now()
+
+        const timeoutHandle = setTimeout(() => {
+          const idx = local.waiters.indexOf(waiter)
+          if (idx !== -1) local.waiters.splice(idx, 1)
+          cleanup()
+          reject(new QueueTimeoutError(key, Date.now() - enqueuedAt, local.waiters.length))
+        }, opts.timeoutMs)
+
+        const onAbort = () => {
+          const idx = local.waiters.indexOf(waiter)
+          if (idx !== -1) local.waiters.splice(idx, 1)
+          clearTimeout(timeoutHandle)
+          cleanup()
+          reject(makeAbortError())
+        }
+
+        const cleanup = () => opts.signal?.removeEventListener('abort', onAbort)
+        opts.signal?.addEventListener('abort', onAbort, { once: true })
+
+        const waiter: Waiter = {
+          resolve: () => {
+            clearTimeout(timeoutHandle)
+            cleanup()
+            opts.onDequeued?.(Date.now() - enqueuedAt)
+            resolve()
+          },
+          reject: (err) => {
+            clearTimeout(timeoutHandle)
+            cleanup()
+            reject(err)
+          },
+          priority: opts.priority,
+          enqueued: enqueuedAt,
+          estimatedInputTokens: opts.estimatedInputTokens,
+          timeoutHandle,
+        }
+
+        insertWaiter(local.waiters, waiter)
+        this.scheduleDrain(key, opts.limits, nextSlotAtMs)
+      })
+    }
+
+    // Rate limit slot acquired — now check concurrency limit
+    const maxConcurrent = opts.limits.maxConcurrent
+    if (maxConcurrent !== undefined && local.activeCount >= maxConcurrent) {
+      if (opts.signal?.aborted) throw makeAbortError()
+
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          const idx = local.concurrencyWaiters.findIndex(w => w.resolve === resolveWrapped)
+          if (idx !== -1) local.concurrencyWaiters.splice(idx, 1)
+          cleanup()
+          reject(makeAbortError())
+        }
+
+        const resolveWrapped = () => { cleanup(); resolve() }
+        const rejectWrapped = (e: Error) => { cleanup(); reject(e) }
+        const cleanup = () => opts.signal?.removeEventListener('abort', onAbort)
+
+        opts.signal?.addEventListener('abort', onAbort, { once: true })
+        local.concurrencyWaiters.push({ resolve: resolveWrapped, reject: rejectWrapped })
+      })
+    }
+
+    if (maxConcurrent !== undefined) local.activeCount++
   }
 
   /**
@@ -189,6 +244,26 @@ export class RateLimitEngine {
     return null
   }
 
+  /** All model keys that have been seen by this engine instance. */
+  knownKeys(): string[] {
+    return Array.from(this.localStates.keys())
+  }
+
+  /**
+   * Signal that a request has completed, decrementing the concurrency counter
+   * and unblocking the next concurrency waiter if one is queued.
+   *
+   * Must be called after every acquire() that succeeded (even on error).
+   * Only has an effect when maxConcurrent is configured for the model.
+   */
+  release(key: string): void {
+    const local = this.localStates.get(key)
+    if (!local || local.activeCount === 0) return
+    local.activeCount--
+    const next = local.concurrencyWaiters.shift()
+    if (next) next.resolve()
+  }
+
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
@@ -196,7 +271,7 @@ export class RateLimitEngine {
   private getOrCreate(key: string): LocalState {
     let state = this.localStates.get(key)
     if (!state) {
-      state = { waiters: [], drainScheduled: false }
+      state = { waiters: [], drainScheduled: false, activeCount: 0, concurrencyWaiters: [] }
       this.localStates.set(key, state)
     }
     return state

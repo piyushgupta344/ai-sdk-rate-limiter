@@ -121,9 +121,7 @@ describe('createRateLimiter().wrap()', () => {
       prompt: [],
     } as unknown as LanguageModelV4CallOptions)
 
-    // completed is emitted twice: once from pipeline (estimate) and once from
-    // the actual usage reconciliation — the second has real tokens
-    expect(onCompleted).toHaveBeenCalled()
+    expect(onCompleted).toHaveBeenCalledTimes(1)
   })
 
   it('rate limits: queues the 2nd request when rpm=1', async () => {

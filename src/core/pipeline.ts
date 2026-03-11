@@ -2,6 +2,7 @@ import type {
   RateLimiterConfig,
   Priority,
   ModelLimits,
+  ScopeConfig,
   CostReport,
   LimiterStatus,
   ModelStatus,
@@ -29,6 +30,30 @@ interface TokenUsage {
 // ---------------------------------------------------------------------------
 // Config resolution helpers
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Scope helpers
+// ---------------------------------------------------------------------------
+
+function matchScope(pattern: string, scope: string): boolean {
+  if (pattern === scope) return true
+  if (pattern.includes('*')) {
+    const regex = new RegExp(
+      '^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$',
+    )
+    return regex.test(scope)
+  }
+  return false
+}
+
+function mergeScopeLimits(base: ModelLimits, scope: ScopeConfig): ModelLimits {
+  return {
+    ...base,
+    ...(scope.rpm !== undefined && { rpm: scope.rpm }),
+    ...(scope.itpm !== undefined && { itpm: scope.itpm }),
+    ...(scope.maxConcurrent !== undefined && { maxConcurrent: scope.maxConcurrent }),
+  }
+}
 
 function resolveRetryConfig(config: RateLimiterConfig): ResolvedRetryConfig {
   const r = config.retry ?? {}
@@ -86,9 +111,28 @@ export class Pipeline {
   // execute — called by both generate and stream adapters
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Scope resolution helpers
+  // -------------------------------------------------------------------------
+
+  private resolveScopedLimits(modelId: string, provider: string, scope: string): ModelLimits {
+    const base = this.resolveModelLimits(modelId, provider)
+    if (!this.config.scopes) return base
+
+    for (const [pattern, scopeConfig] of Object.entries(this.config.scopes)) {
+      if (matchScope(pattern, scope)) {
+        return mergeScopeLimits(base, scopeConfig)
+      }
+    }
+    return base
+  }
+
   /**
    * Execute an AI request through the full pipeline:
-   *   budget check → acquire slot → retry wrapper → usage recording
+   *   budget check → acquire slot → retry wrapper
+   *
+   * Usage recording (completed event) is NOT emitted here. Callers must call
+   * recordUsage() once they have actual token counts from the API response.
    */
   async execute<T>(
     modelId: string,
@@ -99,15 +143,21 @@ export class Pipeline {
       streaming: boolean
       priority: Priority
       timeoutMs: number
-      onUsage: (usage: TokenUsage) => void
       /** Skip the budget pre-check — used when executing a fallback model. */
       skipBudgetCheck?: boolean
+      /** Scope key for multi-tenant rate limiting */
+      scope?: string
+      /** AbortSignal — cancels a queued request if fired before it executes */
+      signal?: AbortSignal
     },
   ): Promise<T> {
-    const limits = this.resolveModelLimits(modelId, provider)
+    const scope = opts.scope
+    const limits = scope
+      ? this.resolveScopedLimits(modelId, provider, scope)
+      : this.resolveModelLimits(modelId, provider)
     const estimatedInput = estimateInputTokens(prompt)
-    const startMs = Date.now()
-    const key = `${provider}:${modelId}`
+    const key = scope ? `${scope}:${provider}:${modelId}` : `${provider}:${modelId}`
+    let slotAcquired = false
 
     // -----------------------------------------------------------------------
     // 1. Budget pre-check
@@ -149,6 +199,7 @@ export class Pipeline {
       estimatedInputTokens: estimatedInput,
       priority: opts.priority,
       timeoutMs: opts.timeoutMs,
+      ...(opts.signal !== undefined && { signal: opts.signal }),
       onQueued: (queueDepth, estimatedWaitMs) => {
         this.emitter.emit('queued', {
           model: modelId,
@@ -174,13 +225,13 @@ export class Pipeline {
         })
       },
     })
+    slotAcquired = true
 
     // -----------------------------------------------------------------------
     // 3. Execute with retry
     // -----------------------------------------------------------------------
-    let result: T
     try {
-      result = await withRetry(fn, this.retryConfig, {
+      const result = await withRetry(fn, this.retryConfig, {
         modelId,
         onRetry: ({ attempt, maxAttempts, delayMs, error }) => {
           this.emitter.emit('retrying', {
@@ -205,6 +256,7 @@ export class Pipeline {
           })
         },
       })
+      return result
     } catch (error) {
       this.emitter.emit('dropped', {
         model: modelId,
@@ -212,43 +264,29 @@ export class Pipeline {
         reason: 'queue-timeout',
       })
       throw error
+    } finally {
+      // Release concurrency slot whether the request succeeded or failed
+      if (slotAcquired) this.engine.release(key)
     }
-
-    // -----------------------------------------------------------------------
-    // 4. Record usage (for non-streaming; streaming calls onUsage from the
-    //    stream interceptor when the finish chunk arrives)
-    // -----------------------------------------------------------------------
-    opts.onUsage({
-      inputTokens: estimatedInput,
-      outputTokens: 0,
-    })
-
-    this.emitter.emit('completed', {
-      model: modelId,
-      provider,
-      inputTokens: estimatedInput,
-      outputTokens: 0,
-      costUsd: 0,
-      latencyMs: Date.now() - startMs,
-      streaming: opts.streaming,
-    })
-
-    return result
   }
 
   /**
    * Record actual usage after a request resolves.
-   * Called with real token counts from the API response.
+   * Called with real token counts from the API response. Emits the single
+   * authoritative `completed` event for this request.
    */
   recordUsage(
     modelId: string,
     provider: string,
+    scope: string | undefined,
     usage: TokenUsage,
     latencyMs: number,
     streaming: boolean,
   ): void {
-    const key = `${provider}:${modelId}`
-    const limits = this.resolveModelLimits(modelId, provider)
+    const key = scope ? `${scope}:${provider}:${modelId}` : `${provider}:${modelId}`
+    const limits = scope
+      ? this.resolveScopedLimits(modelId, provider, scope)
+      : this.resolveModelLimits(modelId, provider)
 
     // Update the sliding window with actuals
     this.engine.recordActualUsage(key, usage.inputTokens, usage.outputTokens)
@@ -281,17 +319,40 @@ export class Pipeline {
   }
 
   getStatus(): LimiterStatus {
-    // We enumerate all known model keys from the engine's internal state
-    // by collecting keys that have been seen — accessed via a proxy getter
     const models: ModelStatus[] = []
-    // Note: we don't expose engine internals directly; status is a snapshot
-    // populated on demand from whatever models have been used
-    return { models, totalQueueDepth: 0 }
+    let totalQueueDepth = 0
+
+    for (const key of this.engine.knownKeys()) {
+      // Key format: "provider:modelId" or "scope:provider:modelId"
+      const colonIdx = key.indexOf(':')
+      const provider = colonIdx !== -1 ? key.slice(0, colonIdx) : key
+      const modelId = colonIdx !== -1 ? key.slice(colonIdx + 1) : key
+
+      const snapshot = this.engine.windowSnapshot(key)
+      const queueDepth = this.engine.queueDepth(key)
+      const backoffUntil = this.engine.backoffUntil(key)
+
+      totalQueueDepth += queueDepth
+      models.push({
+        modelId,
+        provider,
+        requestsInWindow: snapshot.requests,
+        inputTokensInWindow: snapshot.inputTokens,
+        outputTokensInWindow: snapshot.outputTokens,
+        queueDepth,
+        estimatedWaitMs: 0, // async — use limiter.estimatedWait() for an accurate value
+        backoffUntil,
+      })
+    }
+
+    return { models, totalQueueDepth }
   }
 
-  async estimatedWait(modelId: string, provider: string, priority: Priority = 'normal'): Promise<number> {
-    const key = `${provider}:${modelId}`
-    const limits = this.resolveModelLimits(modelId, provider)
+  async estimatedWait(modelId: string, provider: string, priority: Priority = 'normal', scope?: string): Promise<number> {
+    const key = scope ? `${scope}:${provider}:${modelId}` : `${provider}:${modelId}`
+    const limits = scope
+      ? this.resolveScopedLimits(modelId, provider, scope)
+      : this.resolveModelLimits(modelId, provider)
     return this.engine.estimatedWaitMs(key, limits)
   }
 

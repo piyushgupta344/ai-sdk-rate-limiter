@@ -107,7 +107,7 @@ function wrapAsyncIterableStream(
       }
 
       if (result.done) {
-        pipeline.recordUsage(modelId, provider, { inputTokens, outputTokens }, Date.now() - startMs, true)
+        pipeline.recordUsage(modelId, provider, undefined, { inputTokens, outputTokens }, Date.now() - startMs, true)
       }
 
       return result
@@ -215,7 +215,6 @@ async function executeViaProxy(
       streaming: isStreaming,
       priority,
       timeoutMs: queueTimeout,
-      onUsage: () => {},
     },
   )
 
@@ -231,7 +230,7 @@ async function executeViaProxy(
 
   // Non-streaming: extract usage from the response immediately
   const usage = extractUsage(result)
-  pipeline.recordUsage(modelId, provider, usage, Date.now() - startMs, false)
+  pipeline.recordUsage(modelId, provider, undefined, usage, Date.now() - startMs, false)
 
   return result
 }

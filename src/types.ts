@@ -18,6 +18,8 @@ export interface ModelLimits {
   otpm?: number
   /** Max requests per day */
   rpd?: number
+  /** Max requests executing concurrently (in-flight at the same time). Default: unlimited */
+  maxConcurrent?: number
   /** Input price in USD per million tokens */
   inputPricePerMillion: number
   /** Output price in USD per million tokens */
@@ -26,6 +28,28 @@ export interface ModelLimits {
 
 /** Partial overrides the user can provide for any model */
 export type ModelLimitOverride = Partial<ModelLimits>
+
+// ---------------------------------------------------------------------------
+// Multi-tenant scopes
+// ---------------------------------------------------------------------------
+
+/**
+ * Rate limit overrides for a named scope (e.g. per-user or per-org).
+ *
+ * Scope keys in `RateLimiterConfig.scopes` support `*` wildcards:
+ *   `'user:free:*'`  matches  `'user:free:123'`, `'user:free:456'`
+ *
+ * When a scoped request is processed, the matching scope config replaces
+ * the model's global limits — giving each scope its own independent window.
+ */
+export interface ScopeConfig {
+  /** Max requests per minute for this scope */
+  rpm?: number
+  /** Max input tokens per minute for this scope */
+  itpm?: number
+  /** Max concurrent in-flight requests for this scope */
+  maxConcurrent?: number
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -98,6 +122,13 @@ export interface PerRequestOptions {
   priority?: Priority
   /** Override queue timeout for this specific request (ms) */
   timeout?: number
+  /**
+   * Scope key for multi-tenant rate limiting. Requests with the same scope
+   * share an isolated rate limit window independent of other scopes.
+   *
+   * Per-request scope overrides the static scope set in `limiter.wrap(model, { scope })`.
+   */
+  scope?: string
   /** Arbitrary metadata passed through to event handlers */
   metadata?: Record<string, unknown>
 }
@@ -240,6 +271,23 @@ export interface RateLimiterConfig {
   retry?: RetryConfig
   on?: EventHandlers
   /**
+   * Per-scope rate limit overrides for multi-tenant use cases.
+   *
+   * Scope keys support `*` wildcards. When a request carries a scope, the
+   * first matching pattern's limits replace the global model limits for that
+   * request. Each scope gets its own independent rate limit window.
+   *
+   * @example
+   * ```typescript
+   * scopes: {
+   *   'user:free:*':  { rpm: 5,   itpm: 10_000 },
+   *   'user:pro:*':   { rpm: 60,  itpm: 200_000 },
+   *   'org:*':        { rpm: 300, maxConcurrent: 20 },
+   * }
+   * ```
+   */
+  scopes?: Record<string, ScopeConfig>
+  /**
    * Pluggable rate-limit window store.
    *
    * Defaults to InMemoryStore (per-process sliding window).
@@ -275,6 +323,9 @@ export interface RateLimiter {
    * const model = limiter.wrap(openai('gpt-4o'), {
    *   fallback: openai('gpt-4o-mini'),
    * })
+   *
+   * // Multi-tenant: each user gets their own isolated rate limit window.
+   * const model = limiter.wrap(openai('gpt-4o'), { scope: `user:${userId}` })
    */
   wrap(
     model: import('./adapters/vercel-ai-sdk.js').WrappableModel,
@@ -283,6 +334,12 @@ export interface RateLimiter {
       providerId?: string
       /** Fallback model used when a budget cap is hit and onExceeded is 'fallback'. */
       fallback?: import('./adapters/vercel-ai-sdk.js').WrappableModel
+      /**
+       * Scope key for multi-tenant rate limiting. Each unique scope value gets
+       * its own independent rate limit window. Supports wildcard patterns
+       * defined in `config.scopes` (e.g. `'user:free:*'`).
+       */
+      scope?: string
     },
   ): import('./adapters/vercel-ai-sdk.js').WrappableModel
 
