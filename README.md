@@ -77,7 +77,7 @@ const limiter = createRateLimiter({
       daily:   50,
       monthly: 500,
     },
-    onExceeded: 'throw', // or 'queue' — wait until the period resets
+    onExceeded: 'throw', // 'throw' | 'queue' | 'fallback'
   },
 
   // Queue behavior
@@ -169,6 +169,49 @@ Costs are based on **actual token counts** from API responses — not estimates.
 
 ---
 
+## Budget fallback routing
+
+When a budget limit is hit, you can transparently reroute to a cheaper model instead of throwing an error. Pass a `fallback` option to `wrap()`:
+
+```typescript
+const limiter = createRateLimiter({
+  cost: {
+    budget: { daily: 10 },
+    onExceeded: 'fallback',  // reroute to fallback instead of throwing
+  },
+  on: {
+    budgetHit: ({ model, currentCostUsd, limitUsd, period }) =>
+      console.warn(`${model} ${period} budget hit ($${currentCostUsd} of $${limitUsd})`),
+  },
+})
+
+const model = limiter.wrap(
+  openai('gpt-4o'),                     // primary model
+  { fallback: openai('gpt-4o-mini') },  // used when budget is exceeded
+)
+
+// Under budget  → uses gpt-4o normally
+// Over $10/day  → silently switches to gpt-4o-mini, no code changes needed
+const result = await generateText({ model, prompt })
+```
+
+**How it works:**
+1. The budget is checked before every request against total rolling spend
+2. When exceeded, `BudgetExceededError` is caught inside `wrap()` before it reaches your code
+3. The request is re-executed against the fallback model, bypassing the budget pre-check
+4. Fallback usage is tracked under the fallback model's ID in `getCostReport()`
+
+**Behavior matrix:**
+
+| `onExceeded` | `fallback` configured | Outcome |
+|---|---|---|
+| `'throw'` | any | Throws `BudgetExceededError` |
+| `'fallback'` | yes | Transparently uses fallback model |
+| `'fallback'` | no | Throws `BudgetExceededError` |
+| `'queue'` | any | Queues until period resets |
+
+---
+
 ## Backpressure — know before you send
 
 Check estimated wait time before committing to a request. Useful for showing loading states or shedding load gracefully.
@@ -209,7 +252,7 @@ limiter.off('queued', handler)
 | `dequeued` | Request leaves the queue | `model`, `waitedMs`, `priority` |
 | `retrying` | A failed request is about to retry | `model`, `attempt`, `maxAttempts`, `delayMs`, `error` |
 | `rateLimited` | Limit hit (local or remote 429) | `model`, `source`, `limitType`, `resetAt` |
-| `budgetHit` | Cost budget exceeded | `model`, `currentCostUsd`, `limitUsd`, `period` |
+| `budgetHit` | Cost budget exceeded | `model`, `currentCostUsd`, `limitUsd`, `period`, `usingFallback` |
 | `dropped` | Request rejected (queue full or timeout) | `model`, `reason` |
 | `completed` | Request finished successfully | `model`, `inputTokens`, `outputTokens`, `costUsd`, `latencyMs` |
 

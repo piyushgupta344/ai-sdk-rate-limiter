@@ -8,6 +8,7 @@ import type {
   EventMap,
   EventHandler,
 } from '../types.js'
+import { BudgetExceededError } from '../errors.js'
 import { RateLimitEngine } from './rate-limit-engine.js'
 import { CostTracker } from './cost-tracker.js'
 import { Emitter } from './emitter.js'
@@ -98,6 +99,8 @@ export class Pipeline {
       priority: Priority
       timeoutMs: number
       onUsage: (usage: TokenUsage) => void
+      /** Skip the budget pre-check — used when executing a fallback model. */
+      skipBudgetCheck?: boolean
     },
   ): Promise<T> {
     const limits = this.resolveModelLimits(modelId, provider)
@@ -108,19 +111,33 @@ export class Pipeline {
     // -----------------------------------------------------------------------
     // 1. Budget pre-check
     // -----------------------------------------------------------------------
-    if (this.config.cost?.budget) {
+    if (this.config.cost?.budget && !opts.skipBudgetCheck) {
       const estimatedCost = this.costTracker.estimateCost(
         estimatedInput,
         500, // conservative output estimate for pre-check
         limits.inputPricePerMillion,
         limits.outputPricePerMillion,
       )
-      this.costTracker.checkBudget(
-        modelId,
-        estimatedCost,
-        this.config.cost.budget,
-        this.config.cost.onExceeded ?? 'throw',
-      )
+      try {
+        this.costTracker.checkBudget(
+          modelId,
+          estimatedCost,
+          this.config.cost.budget,
+          this.config.cost.onExceeded ?? 'throw',
+        )
+      } catch (err) {
+        if (err instanceof BudgetExceededError) {
+          this.emitter.emit('budgetHit', {
+            model: err.model,
+            provider,
+            currentCostUsd: err.currentCostUsd,
+            limitUsd: err.limitUsd,
+            period: err.period,
+            usingFallback: false,
+          })
+        }
+        throw err
+      }
     }
 
     // -----------------------------------------------------------------------

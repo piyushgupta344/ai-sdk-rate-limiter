@@ -11,6 +11,7 @@
 
 import type { Pipeline } from '../core/pipeline.js'
 import type { Priority, PerRequestOptions } from '../types.js'
+import { BudgetExceededError } from '../errors.js'
 
 // ---------------------------------------------------------------------------
 // Minimal structural types mirroring @ai-sdk/provider
@@ -86,12 +87,13 @@ export interface Middleware {
 function getPerRequestOptions(
   params: LanguageModelV4CallOptions,
   queueTimeout: number,
-): { priority: Priority; timeoutMs: number; metadata: Record<string, unknown> } {
-  const raw = params.providerOptions?.['rateLimiter'] as PerRequestOptions | undefined
+): { priority: Priority; timeoutMs: number; metadata: Record<string, unknown>; skipBudgetCheck: boolean } {
+  const raw = params.providerOptions?.['rateLimiter'] as (PerRequestOptions & { _skipBudgetCheck?: boolean }) | undefined
   return {
     priority: raw?.priority ?? 'normal',
     timeoutMs: raw?.timeout ?? queueTimeout,
     metadata: raw?.metadata ?? {},
+    skipBudgetCheck: raw?._skipBudgetCheck ?? false,
   }
 }
 
@@ -121,7 +123,7 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
     // wrapGenerate — non-streaming
     // -----------------------------------------------------------------------
     async wrapGenerate({ doGenerate, params, model }) {
-      const { priority, timeoutMs } = getPerRequestOptions(params, queueTimeout)
+      const { priority, timeoutMs, skipBudgetCheck } = getPerRequestOptions(params, queueTimeout)
       const modelId = model.modelId
       const provider = model.provider
       const startMs = Date.now()
@@ -136,6 +138,7 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
           streaming: false,
           priority,
           timeoutMs,
+          skipBudgetCheck,
           onUsage: () => {
             // placeholder — we reconcile with actuals below
           },
@@ -155,7 +158,7 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
     // wrapStream — streaming
     // -----------------------------------------------------------------------
     async wrapStream({ doStream, params, model }) {
-      const { priority, timeoutMs } = getPerRequestOptions(params, queueTimeout)
+      const { priority, timeoutMs, skipBudgetCheck } = getPerRequestOptions(params, queueTimeout)
       const modelId = model.modelId
       const provider = model.provider
       const startMs = Date.now()
@@ -170,6 +173,7 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
           streaming: true,
           priority,
           timeoutMs,
+          skipBudgetCheck,
           onUsage: () => {},
         },
       )
@@ -211,10 +215,11 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
 export function wrapModel(
   model: WrappableModel,
   middleware: Middleware,
-  overrides?: { modelId?: string; providerId?: string },
+  overrides?: { modelId?: string; providerId?: string; fallback?: WrappableModel },
 ): WrappableModel {
   const providerId = overrides?.providerId ?? model.provider
   const modelId = overrides?.modelId ?? model.modelId
+  const fallbackModel = overrides?.fallback
 
   return {
     specificationVersion: 'v4' as const,
@@ -223,21 +228,65 @@ export function wrapModel(
     supportedUrls: (model as unknown as Record<string, unknown>)['supportedUrls'],
 
     async doGenerate(params: LanguageModelV4CallOptions): Promise<LanguageModelV4GenerateResult> {
-      return middleware.wrapGenerate({
-        doGenerate: () => model.doGenerate(params),
-        doStream: () => model.doStream(params),
-        params,
-        model,
-      })
+      try {
+        return await middleware.wrapGenerate({
+          doGenerate: () => model.doGenerate(params),
+          doStream: () => model.doStream(params),
+          params,
+          model,
+        })
+      } catch (err) {
+        if (err instanceof BudgetExceededError && fallbackModel) {
+          const fallbackParams = {
+            ...params,
+            providerOptions: {
+              ...params.providerOptions,
+              rateLimiter: {
+                ...((params.providerOptions?.['rateLimiter'] as Record<string, unknown>) ?? {}),
+                _skipBudgetCheck: true,
+              },
+            },
+          }
+          return middleware.wrapGenerate({
+            doGenerate: () => fallbackModel.doGenerate(fallbackParams),
+            doStream: () => fallbackModel.doStream(fallbackParams),
+            params: fallbackParams,
+            model: fallbackModel,
+          })
+        }
+        throw err
+      }
     },
 
     async doStream(params: LanguageModelV4CallOptions): Promise<LanguageModelV4StreamResult> {
-      return middleware.wrapStream({
-        doGenerate: () => model.doGenerate(params),
-        doStream: () => model.doStream(params),
-        params,
-        model,
-      })
+      try {
+        return await middleware.wrapStream({
+          doGenerate: () => model.doGenerate(params),
+          doStream: () => model.doStream(params),
+          params,
+          model,
+        })
+      } catch (err) {
+        if (err instanceof BudgetExceededError && fallbackModel) {
+          const fallbackParams = {
+            ...params,
+            providerOptions: {
+              ...params.providerOptions,
+              rateLimiter: {
+                ...((params.providerOptions?.['rateLimiter'] as Record<string, unknown>) ?? {}),
+                _skipBudgetCheck: true,
+              },
+            },
+          }
+          return middleware.wrapStream({
+            doGenerate: () => fallbackModel.doGenerate(fallbackParams),
+            doStream: () => fallbackModel.doStream(fallbackParams),
+            params: fallbackParams,
+            model: fallbackModel,
+          })
+        }
+        throw err
+      }
     },
   } as WrappableModel
 }
