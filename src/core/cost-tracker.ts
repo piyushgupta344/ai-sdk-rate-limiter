@@ -30,7 +30,7 @@ export class CostTracker {
     model: string,
     estimatedCostUsd: number,
     budget: BudgetPeriod,
-    onExceeded: 'throw' | 'queue',
+    onExceeded: 'throw' | 'queue' | 'fallback',
   ): boolean {
     const now = Date.now()
     this.evict(now)
@@ -45,7 +45,9 @@ export class CostTracker {
 
     for (const { limit, current, period } of checks) {
       if (limit !== undefined && current + estimatedCostUsd > limit) {
-        if (onExceeded === 'throw') {
+        // 'throw' and 'fallback' both raise an error — the adapter handles
+        // the fallback redirect; 'queue' returns false for the caller to queue.
+        if (onExceeded === 'throw' || onExceeded === 'fallback') {
           throw new BudgetExceededError(model, current, limit, period)
         }
         return false // caller should queue

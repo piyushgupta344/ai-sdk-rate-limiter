@@ -58,7 +58,7 @@ export function createRateLimiter(config: RateLimiterConfig = {}): RateLimiter {
       return pipeline.getStatus()
     },
 
-    estimatedWait(modelId: string, priority: Priority = 'normal'): number {
+    estimatedWait(modelId: string, priority: Priority = 'normal'): Promise<number> {
       // Provider is unknown here — use a generic lookup key
       // The engine uses provider:modelId as key; without provider we use the
       // modelId alone as a best-effort lookup
