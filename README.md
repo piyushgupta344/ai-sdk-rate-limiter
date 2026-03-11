@@ -18,6 +18,7 @@ Every developer building with LLMs hits this eventually:
 - Your Node.js server runs 4 instances. They race against the same API quota
 - A bulk job spends $300 overnight and nobody notices until the bill arrives
 - You have no idea which model is responsible for the cost spike
+- In a multi-tenant app, one user's burst shouldn't block everyone else
 
 Every existing tool solves one of these. This solves all of them.
 
@@ -48,15 +49,23 @@ The wrapped model is a drop-in replacement. Every Vercel AI SDK feature — stre
 
 **Priority queuing** — Queued requests drain in priority order (`high` before `normal` before `low`), FIFO within the same priority. Your user-facing requests skip ahead of background jobs.
 
+**Concurrency limits** — Optional `maxConcurrent` cap per model enforced as a semaphore. Requests queue behind in-flight ones, then release slots as they complete.
+
 **Smart retry** — Retries on 429, 500, 502, 503, 504 with exponential backoff + jitter. Honors the `Retry-After` header exactly — if the API says wait 3 seconds, waits 3 seconds, not 30.
 
 **Cost tracking** — Records actual token usage from every response. Reports hourly, daily, and monthly spend per model. Optionally enforces budget caps.
+
+**Multi-tenant scoped limits** — Give each user or org its own isolated rate limit window without running separate limiter instances. Wildcard patterns match user tiers.
+
+**AbortSignal propagation** — Cancelling a request (e.g. user navigates away) immediately removes it from the queue. No wasted API calls for abandoned requests.
 
 **Built-in model registry** — Knows the RPM, ITPM, and per-token pricing for every major OpenAI, Anthropic, Google, Groq, Mistral, and Cohere model out of the box. Nothing to configure to get started.
 
 **Raw SDK support** — Works with the native OpenAI, Anthropic, Groq, Mistral, and Cohere SDKs directly via a transparent JavaScript Proxy. No Vercel AI SDK required.
 
 **OpenTelemetry** — Drop-in OTel plugin that emits GenAI-spec spans for every request. Works with any OTel-compatible tracer.
+
+**Testing utilities** — `createTestLimiter()` records every completed call so you can assert on model usage, token counts, and costs in unit tests.
 
 **CLI audit** — `npx ai-sdk-rate-limiter audit` probes your API keys to detect your actual tier limits and generates a ready-to-paste config override.
 
@@ -68,6 +77,9 @@ The wrapped model is a drop-in replacement. Every Vercel AI SDK feature — stre
 - [Raw SDK proxy](#raw-sdk-proxy)
 - [Configuration reference](#configuration-reference)
 - [Per-request options](#per-request-options)
+- [Multi-tenant scoped limits](#multi-tenant-scoped-limits)
+- [Concurrency limits](#concurrency-limits)
+- [AbortSignal support](#abortsignal-support)
 - [Cost tracking](#cost-tracking)
 - [Budget fallback routing](#budget-fallback-routing)
 - [Multi-instance Redis store](#multi-instance-redis-store)
@@ -75,6 +87,7 @@ The wrapped model is a drop-in replacement. Every Vercel AI SDK feature — stre
 - [Backpressure](#backpressure)
 - [Error handling](#error-handling)
 - [OpenTelemetry](#opentelemetry)
+- [Testing utilities](#testing-utilities)
 - [CLI audit](#cli-audit)
 - [Model registry](#model-registry)
 - [Advanced usage](#advanced-usage)
@@ -209,7 +222,7 @@ Everything has a sensible default. Override only what you need.
 const limiter = createRateLimiter({
   // Override or extend built-in model limits for your API tier
   limits: {
-    'gpt-4o':          { rpm: 500, itpm: 30_000 },
+    'gpt-4o':          { rpm: 500, itpm: 30_000, maxConcurrent: 20 },
     'claude-opus-4-6': { rpm: 50,  itpm: 20_000 },
   },
 
@@ -239,6 +252,13 @@ const limiter = createRateLimiter({
     jitter:          true,           // ±30% randomness (prevents thundering herd)
     parseRetryAfter: true,           // honor Retry-After header from 429 responses
     retryOn:         [429, 500, 502, 503, 504],
+  },
+
+  // Per-scope rate limit overrides for multi-tenant use cases
+  scopes: {
+    'user:free:*':  { rpm: 5,   itpm: 10_000 },
+    'user:pro:*':   { rpm: 60,  itpm: 200_000 },
+    'org:*':        { rpm: 300, maxConcurrent: 20 },
   },
 
   // Observability — see Events section for all available events
@@ -284,9 +304,152 @@ await generateText({
     rateLimiter: { priority: 'low' },
   },
 })
+
+// Per-request scope (overrides any static scope set in limiter.wrap())
+await generateText({
+  model,
+  prompt: 'User message...',
+  providerOptions: {
+    rateLimiter: { scope: `user:${userId}` },
+  },
+})
 ```
 
 This is the recommended way to colocate user requests and background jobs on the same model without background jobs starving users.
+
+---
+
+## Multi-tenant scoped limits
+
+Scoped limits give each user, org, or tenant its own isolated rate limit window. A burst from one user doesn't consume quota for anyone else.
+
+### Static scope on the model
+
+```typescript
+// Each user gets their own model with an isolated window
+function getModelForUser(userId: string) {
+  return limiter.wrap(openai('gpt-4o'), { scope: `user:${userId}` })
+}
+
+// user:alice has its own RPM/ITPM window independent of user:bob
+const aliceModel = getModelForUser('alice')
+const bobModel   = getModelForUser('bob')
+```
+
+### Per-request scope
+
+```typescript
+// Same wrapped model, different scope per call
+await generateText({
+  model,
+  prompt: req.body.message,
+  providerOptions: {
+    rateLimiter: { scope: `user:${req.user.id}` },
+  },
+})
+```
+
+Per-request scope takes precedence over any static scope set in `limiter.wrap()`.
+
+### Defining scope-level limits
+
+Use `config.scopes` to define separate rate limits for each scope tier. Keys support `*` wildcards:
+
+```typescript
+const limiter = createRateLimiter({
+  scopes: {
+    'user:free:*':  { rpm: 5,   itpm: 10_000  },  // free tier: 5 rpm each
+    'user:pro:*':   { rpm: 60,  itpm: 200_000 },  // pro tier: 60 rpm each
+    'org:*':        { rpm: 300, maxConcurrent: 20 },
+  },
+})
+
+// Each scope gets its own isolated window under the matched limits
+await generateText({
+  model,
+  providerOptions: {
+    rateLimiter: { scope: 'user:free:alice' }, // matches 'user:free:*' → 5 rpm
+  },
+})
+```
+
+**Scope fields:**
+
+| Field | Description |
+|---|---|
+| `rpm` | Max requests per minute for this scope |
+| `itpm` | Max input tokens per minute for this scope |
+| `maxConcurrent` | Max concurrent in-flight requests for this scope |
+
+When a scope matches, its limits replace the model's global limits for that request. Each scope gets a fully independent sliding window — `user:alice` and `user:bob` don't share quota.
+
+If no `scopes` config is defined, the model's global limits apply to all scoped requests.
+
+---
+
+## Concurrency limits
+
+Limit how many requests to a model can be in-flight simultaneously. Useful for:
+- Preventing connection pool exhaustion
+- Controlling cost burn rate during spikes
+- Enforcing per-scope parallelism
+
+```typescript
+const limiter = createRateLimiter({
+  limits: {
+    'gpt-4o': {
+      rpm: 500,
+      maxConcurrent: 10, // at most 10 requests executing at once
+    },
+  },
+})
+```
+
+Once `maxConcurrent` slots are occupied, new requests queue behind them. Each slot is released when its request completes (success or failure). Concurrency is checked after the rate limit slot is acquired — both limits apply independently.
+
+Concurrency limits also work in scoped contexts:
+
+```typescript
+const limiter = createRateLimiter({
+  scopes: {
+    'org:*': { rpm: 300, maxConcurrent: 20 },
+  },
+})
+```
+
+---
+
+## AbortSignal support
+
+Pass an `AbortSignal` to cancel a request that's waiting in the queue. If the signal fires before the request starts executing, it's removed from the queue immediately and the promise rejects with an `AbortError`.
+
+```typescript
+const controller = new AbortController()
+
+// User closes the browser tab — cancel pending AI requests
+window.addEventListener('beforeunload', () => controller.abort())
+
+const result = await generateText({
+  model,
+  prompt: 'Long running task...',
+  abortSignal: controller.signal,
+})
+```
+
+```typescript
+// With timeout
+const signal = AbortSignal.timeout(5_000)
+
+try {
+  const result = await generateText({ model, prompt, abortSignal: signal })
+} catch (err) {
+  if (err.name === 'AbortError') {
+    console.log('Request cancelled (timed out or aborted)')
+  }
+}
+```
+
+The signal threads through both the rate-limit queue and the concurrency queue. A request that's already executing is not affected — only queued requests can be aborted this way.
 
 ---
 
@@ -476,6 +639,9 @@ try {
   } else if (error instanceof RateLimitExceededError) {
     // Rate limit hit and the request could not be queued
     console.error(`${error.model} ${error.limitType} limit of ${error.limit} exceeded`)
+  } else if (error.name === 'AbortError') {
+    // Request was cancelled via AbortSignal before it started executing
+    console.log('Request cancelled')
   }
 }
 ```
@@ -546,6 +712,67 @@ const limiter = createRateLimiter({
   on: createOtelPlugin(tracer),
 })
 ```
+
+---
+
+## Testing utilities
+
+The `ai-sdk-rate-limiter/testing` entry point provides a test-friendly limiter that records every completed call. Use it to assert on model usage, token counts, and costs in unit tests without mocking internals.
+
+```typescript
+import { createTestLimiter } from 'ai-sdk-rate-limiter/testing'
+import { openai } from '@ai-sdk/openai'
+import { generateText } from 'ai'
+
+const limiter = createTestLimiter()
+const model = limiter.wrap(openai('gpt-4o'))
+
+// Run your code under test
+await generateText({ model, prompt: 'Hello!' })
+await generateText({ model, prompt: 'Another request' })
+
+// Assert on recorded calls
+const calls = limiter.getCalls()
+expect(calls).toHaveLength(2)
+expect(calls[0].modelId).toBe('gpt-4o')
+expect(calls[0].inputTokens).toBeGreaterThan(0)
+expect(calls[0].costUsd).toBeGreaterThan(0)
+
+// Reset between tests
+limiter.reset()
+```
+
+`createTestLimiter()` accepts the same config as `createRateLimiter()`, so you can test budget enforcement, retry behavior, and other scenarios with real config:
+
+```typescript
+const limiter = createTestLimiter({
+  cost: { budget: { daily: 0.01 }, onExceeded: 'throw' },
+})
+
+// Test that your code handles budget errors gracefully
+```
+
+**`CallRecord` fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `modelId` | `string` | Model that was called |
+| `provider` | `string` | Provider name |
+| `inputTokens` | `number` | Input tokens from the API response |
+| `outputTokens` | `number` | Output tokens from the API response |
+| `costUsd` | `number` | Cost in USD for this call |
+| `latencyMs` | `number` | Total latency in ms |
+| `streaming` | `boolean` | Whether this was a streaming call |
+| `timestamp` | `number` | Unix timestamp (ms) when the call completed |
+
+**Methods:**
+
+| Method | Description |
+|---|---|
+| `getCalls()` | Returns all completed calls in chronological order |
+| `reset()` | Clears call history |
+
+All other `RateLimiter` methods (`wrap`, `rawProxy`, `getCostReport`, `getStatus`, `on`, `off`) work identically.
 
 ---
 
@@ -724,6 +951,30 @@ const model = req.user.plan === 'paid'
   : freeLimiter.wrap(openai('gpt-4o-mini'))
 ```
 
+### Per-user limits with a single limiter
+
+For large numbers of users, scoped limits are more efficient than one limiter per user:
+
+```typescript
+const limiter = createRateLimiter({
+  scopes: {
+    'user:free:*': { rpm: 5,  itpm: 10_000 },
+    'user:pro:*':  { rpm: 60, itpm: 200_000 },
+  },
+})
+
+const model = limiter.wrap(openai('gpt-4o'))
+
+// Each request is tracked in an isolated window per user
+await generateText({
+  model,
+  prompt: req.body.message,
+  providerOptions: {
+    rateLimiter: { scope: `user:${req.user.plan}:${req.user.id}` },
+  },
+})
+```
+
 ### Combine OTel tracing with event logging
 
 ```typescript
@@ -764,6 +1015,12 @@ const limiter = createRateLimiter({ store: new MyStore() })
 
 **Queue** — A sorted priority queue per model, ordered by `priority` then enqueue time (FIFO within same priority). A drain timer fires when the oldest window entry expires, processing as many waiters as possible before rescheduling.
 
+**Concurrency** — A semaphore (`activeCount` + `concurrencyWaiters`) per model key, checked after the rate limit slot is acquired. `release()` decrements the count and unblocks the next waiter.
+
+**Scoped limits** — Each scoped request uses a key in the form `scope:provider:modelId`. That key gets its own independent sliding window. Wildcard patterns in `config.scopes` are matched with `*` → `.*` regex expansion.
+
+**AbortSignal** — The signal is registered as an event listener on both the rate-limit queue and the concurrency queue. If it fires, the request is spliced out of whichever queue it's in and the promise rejects with an `AbortError`.
+
 **Retry-After propagation** — When a remote 429 arrives with a `Retry-After` header, the backoff is applied to the entire model key in the engine, not just the failing request. All requests queued behind it pause until the backoff clears. This prevents the common thundering-herd failure where you retry one request while 10 others immediately follow and all get 429s.
 
 **Token estimation** — Before a request fires, tokens are estimated from the prompt text (~4 chars/token) and reserved in the window. After the response, actual usage from the API replaces the estimate. For streaming, actual counts come from the `finish` chunk (Vercel AI SDK) or the final usage chunk (raw proxy).
@@ -781,10 +1038,14 @@ const limiter = createRateLimiter({ store: new MyStore() })
 | Model-aware limits | yes | no | no | no | partial |
 | ITPM / token tracking | yes | no | no | no | no |
 | Priority queue | yes | yes | no | no | no |
+| Concurrency limits | yes | yes | yes | no | no |
 | Cost tracking + budgets | yes | no | no | no | no |
+| Multi-tenant scoped limits | yes | no | no | no | no |
+| AbortSignal propagation | yes | no | no | no | no |
 | Retry-After header | yes | no | no | partial | partial |
 | Backoff propagation | yes | no | no | no | no |
 | OpenTelemetry | yes | no | no | no | partial |
+| Testing utilities | yes | no | no | no | no |
 | CLI audit | yes | no | no | no | no |
 | Zero runtime deps | yes | no | yes | — | no |
 | Provider-agnostic | yes | yes | yes | no | no |
@@ -804,12 +1065,15 @@ Fully typed. All configuration options, events, errors, and report shapes have p
 ```typescript
 import type {
   RateLimiterConfig,
+  ModelLimits,
+  ScopeConfig,
   CostReport,
   EventMap,
   QueuedEvent,
   Priority,
-  ModelLimits,
 } from 'ai-sdk-rate-limiter'
+
+import type { CallRecord } from 'ai-sdk-rate-limiter/testing'
 ```
 
 ---
