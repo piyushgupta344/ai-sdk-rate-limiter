@@ -224,6 +224,9 @@ const limiter = createRateLimiter({
   limits: {
     'gpt-4o':          { rpm: 500, itpm: 30_000, maxConcurrent: 20 },
     'claude-opus-4-6': { rpm: 50,  itpm: 20_000 },
+    // rpd  — requests per day (enforced in a rolling 24-hour window)
+    // otpm — output tokens per minute (based on actuals from completed requests)
+    'gemini-1.5-flash': { rpm: 15, rpd: 1_500, otpm: 500_000 },
   },
 
   // Cost budgets and behavior when exceeded
@@ -373,7 +376,17 @@ await generateText({
 })
 ```
 
-**Scope fields:**
+**Model limit fields:**
+
+| Field | Description |
+|---|---|
+| `rpm` | Max requests per minute |
+| `itpm` | Max input tokens per minute |
+| `otpm` | Max output tokens per minute (based on completed request actuals) |
+| `rpd` | Max requests per day (rolling 24-hour window) |
+| `maxConcurrent` | Max concurrent in-flight requests |
+
+**Scope fields (`config.scopes`):**
 
 | Field | Description |
 |---|---|
@@ -508,7 +521,7 @@ const result = await generateText({ model, prompt })
 | `'throw'` | any | Throws `BudgetExceededError` |
 | `'fallback'` | yes | Transparently uses fallback model |
 | `'fallback'` | no | Throws `BudgetExceededError` |
-| `'queue'` | any | Queues until period resets |
+| `'queue'` | any | Holds the request until the rolling window clears enough spend; throws `QueueTimeoutError` if `queue.timeout` elapses |
 
 Fallback usage is tracked under the fallback model's ID in `getCostReport()`.
 
@@ -546,7 +559,9 @@ new RedisStore(redis, {
 
 **How it works internally:**
 
-Each request runs a Lua script atomically that: removes stale entries from a sorted set, counts requests and tokens in the current window, checks against RPM and ITPM limits, and either reserves the slot or returns when the next slot opens. The local queue (priority ordering, drain timer, timeout handling) stays in-memory per instance — only the window counters are shared via Redis.
+Each request runs a Lua script atomically that: removes stale entries from a sorted set, counts requests and tokens in the current window, checks against RPM, ITPM, OTPM, and RPD limits, and either reserves the slot or returns when the next slot opens. The local queue (priority ordering, drain timer, timeout handling) stays in-memory per instance — only the window counters are shared via Redis.
+
+**Failover** — If Redis is unreachable (connection error, timeout), the store fails open: rate limit enforcement is suspended for that call and the request proceeds normally. Enforcement resumes as soon as the store recovers. This means AI calls never block on Redis availability — you trade enforcement precision for reliability during outages.
 
 **Compatible clients** — any client with `eval()`, `get()`, and `set()` works: `ioredis`, `node-redis`, Upstash Redis.
 
@@ -999,9 +1014,11 @@ Implement `RateLimitStore` to use any backend (DynamoDB, Postgres, etc.):
 import type { RateLimitStore } from 'ai-sdk-rate-limiter'
 
 class MyStore implements RateLimitStore {
-  async checkAndReserve(key, tokens, limits) { /* ... */ }
-  async applyBackoff(key, untilMs) { /* ... */ }
+  async checkAndRecord(key, estimatedInputTokens, limits) { /* ... */ }
+  async reconcile(key, actualInputTokens, actualOutputTokens) { /* ... */ }
+  async setBackoff(key, untilMs) { /* ... */ }
   async getBackoff(key) { /* ... */ }
+  async nextSlotMs(key, limits, estimatedInputTokens) { /* ... */ }
 }
 
 const limiter = createRateLimiter({ store: new MyStore() })
@@ -1011,7 +1028,7 @@ const limiter = createRateLimiter({ store: new MyStore() })
 
 ## How it works
 
-**Rate limiting** — Sliding window counter per model. Each model tracks a list of `{timestamp, tokens}` entries for the past 60 seconds. On every request, stale entries are evicted and the window is checked against RPM and ITPM limits simultaneously.
+**Rate limiting** — Sliding window counter per model. Each model tracks a list of `{timestamp, tokens}` entries for the past 60 seconds. On every request, stale entries are evicted and the window is checked against RPM, ITPM, and OTPM limits simultaneously. RPD uses a separate 24-hour rolling window. OTPM is based on actual output token counts from completed requests.
 
 **Queue** — A sorted priority queue per model, ordered by `priority` then enqueue time (FIFO within same priority). A drain timer fires when the oldest window entry expires, processing as many waiters as possible before rescheduling.
 
@@ -1023,7 +1040,7 @@ const limiter = createRateLimiter({ store: new MyStore() })
 
 **Retry-After propagation** — When a remote 429 arrives with a `Retry-After` header, the backoff is applied to the entire model key in the engine, not just the failing request. All requests queued behind it pause until the backoff clears. This prevents the common thundering-herd failure where you retry one request while 10 others immediately follow and all get 429s.
 
-**Token estimation** — Before a request fires, tokens are estimated from the prompt text (~4 chars/token) and reserved in the window. After the response, actual usage from the API replaces the estimate. For streaming, actual counts come from the `finish` chunk (Vercel AI SDK) or the final usage chunk (raw proxy).
+**Token estimation** — Before a request fires, tokens are estimated from the prompt text (~4 chars/token) and reserved in the window. After the response, actual usage from the API replaces the estimate. For streaming, actual counts come from the `finish` chunk (Vercel AI SDK) or the final usage chunk (raw proxy). If a stream ends without a usage chunk (some error paths), the window is updated with zeros rather than leaving the estimate in place.
 
 **Zero dependencies** — The Vercel AI SDK middleware interface is implemented structurally — `@ai-sdk/provider` types are used for type checking only and not required at runtime. No `ioredis`, no `bottleneck`, no tokenizer libraries in the core.
 
