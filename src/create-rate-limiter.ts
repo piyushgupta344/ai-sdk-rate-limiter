@@ -9,6 +9,7 @@ import type {
 } from './types.js'
 import { Pipeline } from './core/pipeline.js'
 import { createMiddleware, wrapModel, type WrappableModel, type Middleware } from './adapters/vercel-ai-sdk.js'
+import { createRawProxy } from './adapters/raw-sdk-proxy.js'
 
 /**
  * Create a rate limiter instance.
@@ -40,7 +41,7 @@ export function createRateLimiter(config: RateLimiterConfig = {}): RateLimiter {
   return {
     wrap(
       model: WrappableModel,
-      options?: { modelId?: string; providerId?: string },
+      options?: { modelId?: string; providerId?: string; fallback?: WrappableModel },
     ): WrappableModel {
       return wrapModel(model, middleware, options)
     },
@@ -62,6 +63,13 @@ export function createRateLimiter(config: RateLimiterConfig = {}): RateLimiter {
       // The engine uses provider:modelId as key; without provider we use the
       // modelId alone as a best-effort lookup
       return pipeline.estimatedWait(modelId, '', priority)
+    },
+
+    rawProxy<T extends object>(
+      client: T,
+      options?: { provider?: string; priority?: Priority },
+    ): T {
+      return createRawProxy(client, pipeline, queueTimeout, options)
     },
 
     on<K extends keyof EventMap>(event: K, handler: EventHandler<K>): void {

@@ -52,7 +52,9 @@ The wrapped model is a drop-in replacement. Every Vercel AI SDK feature — stre
 
 **Cost tracking** — Records actual token usage from every response. Reports hourly, daily, and monthly spend per model. Optionally enforces budget caps.
 
-**Built-in model registry** — Knows the RPM, ITPM, and per-token pricing for every major OpenAI, Anthropic, and Google model out of the box. Nothing to configure to get started.
+**Built-in model registry** — Knows the RPM, ITPM, and per-token pricing for every major OpenAI, Anthropic, Google, Groq, Mistral, and Cohere model out of the box. Nothing to configure to get started.
+
+**Raw SDK support** — Works with the native OpenAI, Anthropic, Groq, Mistral, and Cohere SDKs directly via a transparent JavaScript Proxy. No Vercel AI SDK required.
 
 ---
 
@@ -209,6 +211,76 @@ const result = await generateText({ model, prompt })
 | `'fallback'` | yes | Transparently uses fallback model |
 | `'fallback'` | no | Throws `BudgetExceededError` |
 | `'queue'` | any | Queues until period resets |
+
+---
+
+## Raw SDK proxy
+
+If you're using the OpenAI, Anthropic, Groq, Mistral, or Cohere SDK directly — without the Vercel AI SDK — use `limiter.rawProxy()` to add rate limiting as a transparent drop-in:
+
+```typescript
+import { createRateLimiter } from 'ai-sdk-rate-limiter'
+import OpenAI from 'openai'
+import Anthropic from '@anthropic-ai/sdk'
+
+const limiter = createRateLimiter({
+  cost: { budget: { daily: 50 }, onExceeded: 'throw' },
+  on: { rateLimited: ({ model }) => console.warn(`${model} rate limited`) },
+})
+
+// Every API call goes through the same rate limiter and cost tracker
+const openai   = limiter.rawProxy(new OpenAI())
+const anthropic = limiter.rawProxy(new Anthropic())
+
+// Use exactly as before — no other changes needed
+const completion = await openai.chat.completions.create({
+  model: 'gpt-4o',
+  messages: [{ role: 'user', content: 'Hello!' }],
+})
+
+const message = await anthropic.messages.create({
+  model: 'claude-opus-4-6',
+  max_tokens: 1024,
+  messages: [{ role: 'user', content: 'Hello!' }],
+})
+
+// Cost from both clients tracked together
+const report = limiter.getCostReport()
+```
+
+**Streaming works too** — the proxy wraps the returned `AsyncIterable` to capture the final usage chunk automatically:
+
+```typescript
+const stream = await openai.chat.completions.create({
+  model: 'gpt-4o',
+  messages: [{ role: 'user', content: 'Stream this' }],
+  stream: true,
+  stream_options: { include_usage: true },  // tells OpenAI to include usage in final chunk
+})
+
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? '')
+}
+// After the loop, usage is recorded in limiter.getCostReport()
+```
+
+**Zero-config standalone version** — if you don't need to share the limiter with other models:
+
+```typescript
+import { rateLimited } from 'ai-sdk-rate-limiter'
+
+const openai = rateLimited(new OpenAI(), {
+  config: { cost: { budget: { daily: 20 } } },
+})
+```
+
+**Provider is auto-detected** from the client's constructor name (`OpenAI`, `Anthropic`, `Groq`, etc.). Override it explicitly if needed:
+
+```typescript
+const client = limiter.rawProxy(new OpenAI({ baseURL: 'https://api.groq.com/openai/v1' }), {
+  provider: 'groq',  // use Groq's limits and pricing instead of OpenAI's
+})
+```
 
 ---
 
@@ -449,6 +521,7 @@ console.log(isKnownModel('my-fine-tune', 'openai'))
 | | ai-sdk-rate-limiter | bottleneck | p-limit | SDK built-in retry | LangChain |
 |---|:---:|:---:|:---:|:---:|:---:|
 | Vercel AI SDK `.wrap()` | yes | no | no | — | no |
+| Raw SDK proxy | yes | no | no | — | no |
 | Model-aware limits | yes | no | no | no | partial |
 | ITPM / token tracking | yes | no | no | no | no |
 | Priority queue | yes | yes | no | no | no |

@@ -18,6 +18,8 @@
  */
 
 export { createRateLimiter } from './create-rate-limiter.js'
+export { rateLimited } from './adapters/raw-sdk-proxy.js'
+export type { RawSdkProxyOptions } from './adapters/raw-sdk-proxy.js'
 
 // Errors
 export {

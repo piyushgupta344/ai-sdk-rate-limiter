@@ -37,14 +37,25 @@ export interface BudgetPeriod {
   monthly?: number
 }
 
-export type BudgetExceededAction = 'throw' | 'queue'
+export type BudgetExceededAction = 'throw' | 'queue' | 'fallback'
 
 export interface CostConfig {
   /** Budget caps in USD. Requests exceeding the cap will follow onExceeded behavior. */
   budget?: BudgetPeriod
-  /** What to do when a budget cap is hit. Default: 'throw' */
+  /**
+   * What to do when a budget cap is hit. Default: 'throw'
+   *
+   * - 'throw'    — throw BudgetExceededError immediately
+   * - 'queue'    — hold the request until the period resets
+   * - 'fallback' — transparently retry with the fallback model configured on
+   *                limiter.wrap(model, { fallback: cheaperModel })
+   */
   onExceeded?: BudgetExceededAction
-  /** If onExceeded is 'queue', the request waits until the period resets */
+  /**
+   * Model ID to document which model is the intended fallback.
+   * Informational only — the actual fallback model is passed to limiter.wrap().
+   */
+  fallbackModel?: string
 }
 
 export interface QueueConfig {
@@ -134,6 +145,8 @@ export interface BudgetHitEvent {
   currentCostUsd: number
   limitUsd: number
   period: 'hourly' | 'daily' | 'monthly'
+  /** True when the request was transparently retried with a fallback model. */
+  usingFallback: boolean
 }
 
 export interface DroppedEvent {
@@ -238,11 +251,21 @@ export interface RateLimiter {
    *
    * @example
    * const model = limiter.wrap(openai('gpt-4o'))
-   * const result = await generateText({ model, prompt: '...' })
+   *
+   * // With budget fallback — when the primary model's budget is hit, the
+   * // request is transparently retried with the cheaper fallback model.
+   * const model = limiter.wrap(openai('gpt-4o'), {
+   *   fallback: openai('gpt-4o-mini'),
+   * })
    */
   wrap(
     model: import('./adapters/vercel-ai-sdk.js').WrappableModel,
-    options?: { modelId?: string; providerId?: string },
+    options?: {
+      modelId?: string
+      providerId?: string
+      /** Fallback model used when a budget cap is hit and onExceeded is 'fallback'. */
+      fallback?: import('./adapters/vercel-ai-sdk.js').WrappableModel
+    },
   ): import('./adapters/vercel-ai-sdk.js').WrappableModel
 
   /**
@@ -261,6 +284,29 @@ export interface RateLimiter {
    * Returns 0 if the model would proceed immediately.
    */
   estimatedWait(modelId: string, priority?: Priority): number
+
+  /**
+   * Wrap a raw AI SDK client (OpenAI, Anthropic, Groq, Mistral, Cohere) with
+   * rate limiting using the same pipeline as this limiter instance.
+   *
+   * Budget tracking, events, and rate limit state are shared with models
+   * wrapped via limiter.wrap().
+   *
+   * @example
+   * ```typescript
+   * const limiter = createRateLimiter({ cost: { budget: { daily: 50 } } })
+   *
+   * const openai = limiter.rawProxy(new OpenAI())
+   * const anthropic = limiter.rawProxy(new Anthropic())
+   *
+   * // Use exactly as before
+   * await openai.chat.completions.create({ model: 'gpt-4o', messages: [...] })
+   * ```
+   */
+  rawProxy<T extends object>(
+    client: T,
+    options?: { provider?: string; priority?: Priority },
+  ): T
 
   /** Register an event listener */
   on<K extends keyof EventMap>(event: K, handler: EventHandler<K>): void
