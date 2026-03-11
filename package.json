@@ -1,6 +1,6 @@
 {
   "name": "ai-sdk-rate-limiter",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Smart rate limiting, queuing, and cost tracking middleware for AI SDK calls. Works across providers.",
   "type": "module",
   "main": "./dist/index.cjs",
