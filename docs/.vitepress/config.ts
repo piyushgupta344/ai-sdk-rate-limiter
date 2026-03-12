@@ -35,6 +35,7 @@ export default defineConfig({
           { text: 'Multi-tenant scopes', link: '/guide/scopes' },
           { text: 'Circuit breaker', link: '/guide/circuit-breaker' },
           { text: 'Metrics & observability', link: '/guide/observability' },
+          { text: 'Testing', link: '/guide/testing' },
           { text: 'Advanced patterns', link: '/guide/advanced' },
         ],
       },
