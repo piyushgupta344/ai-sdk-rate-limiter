@@ -15,19 +15,28 @@
 import express from 'express'
 import { openai } from '@ai-sdk/openai'
 import { generateText } from 'ai'
-import {
-  BudgetExceededError,
-  QueueTimeoutError,
-  QueueFullError,
-  CircuitOpenError,
-  RateLimiterError,
-} from 'ai-sdk-rate-limiter'
+import { createRateLimiterMiddleware } from 'ai-sdk-rate-limiter/middleware'
 import { limiter } from './limiter.js'
 
 const app = express()
 app.use(express.json())
 
-// Wrap the model once — the scope is injected per-request below.
+// Attach req.rateLimiter (scope + priority) to every request.
+// That's all the route handlers need — no per-route error handling or scope logic.
+const { middleware, errorHandler } = createRateLimiterMiddleware(limiter, {
+  scope: (req) => {
+    const userId = req.headers['x-user-id']
+    const plan   = req.headers['x-user-plan'] ?? 'free'
+    if (!userId) return undefined
+    return `user:${plan}:${userId}`  // matched against 'user:free:*' / 'user:pro:*'
+  },
+  priority: (req) => req.headers['x-user-plan'] === 'pro' ? 'normal' : 'low',
+  injectHeaders: 'gpt-4o-mini',  // X-RateLimit-* on every response
+})
+
+app.use(middleware)
+
+// Wrap the model once — scope flows in automatically via providerOptions
 const model = limiter.wrap(openai('gpt-4o-mini'))
 
 // ---------------------------------------------------------------------------
@@ -38,11 +47,9 @@ const model = limiter.wrap(openai('gpt-4o-mini'))
 //          X-User-Plan — 'free' | 'pro' | 'org' (default: 'free')
 // ---------------------------------------------------------------------------
 app.post('/chat', async (req, res) => {
-  const userId = req.headers['x-user-id'] as string | undefined
-  const plan   = (req.headers['x-user-plan'] as string | undefined) ?? 'free'
   const { message } = req.body as { message?: string }
 
-  if (!userId) {
+  if (!req.headers['x-user-id']) {
     res.status(400).json({ error: 'X-User-Id header is required' })
     return
   }
@@ -51,31 +58,14 @@ app.post('/chat', async (req, res) => {
     return
   }
 
-  // Build the scope key — matched against 'user:free:*' / 'user:pro:*' in limiter config.
-  // Each scope gets its own isolated RPM window.
-  const scope = `user:${plan}:${userId}`
+  const { text, usage } = await generateText({
+    model,
+    prompt: message,
+    // req.rateLimiter already has scope + priority — just pass it through
+    providerOptions: { rateLimiter: req.rateLimiter },
+  })
 
-  try {
-    const { text, usage } = await generateText({
-      model,
-      prompt: message,
-      providerOptions: {
-        rateLimiter: {
-          scope,
-          // Free-tier requests get lower priority so Pro users skip the queue
-          priority: plan === 'free' ? 'low' : 'normal',
-        },
-      },
-    })
-
-    res.json({
-      text,
-      usage,
-      scope,
-    })
-  } catch (err) {
-    handleRateLimiterError(err, res)
-  }
+  res.json({ text, usage, scope: req.rateLimiter?.scope })
 })
 
 // ---------------------------------------------------------------------------
@@ -125,45 +115,9 @@ process.on('SIGTERM', async () => {
   process.exit(0)
 })
 
-// ---------------------------------------------------------------------------
-// Error handler
-// ---------------------------------------------------------------------------
-function handleRateLimiterError(err: unknown, res: express.Response): void {
-  if (err instanceof QueueTimeoutError) {
-    res.status(503).json({
-      error: 'Request queued too long. Try again shortly.',
-      retryAfterMs: 5_000,
-    })
-    return
-  }
-  if (err instanceof QueueFullError) {
-    res.status(503).json({
-      error: 'Server busy. Try again in a moment.',
-    })
-    return
-  }
-  if (err instanceof BudgetExceededError) {
-    res.status(402).json({
-      error: `Daily AI budget exceeded ($${err.limitUsd}). Resets tomorrow.`,
-    })
-    return
-  }
-  if (err instanceof CircuitOpenError) {
-    const retryAfterSec = Math.ceil((err.openUntilMs - Date.now()) / 1000)
-    res.status(503).json({
-      error: 'AI provider temporarily unavailable.',
-      retryAfter: retryAfterSec,
-    })
-    return
-  }
-  if (err instanceof RateLimiterError) {
-    res.status(429).json({ error: err.message })
-    return
-  }
-
-  console.error('[server] Unexpected error:', err)
-  res.status(500).json({ error: 'Internal server error' })
-}
+// Rate limiter error handler — MUST be after routes
+// Converts QueueTimeoutError → 503, BudgetExceededError → 402, etc.
+app.use(errorHandler)
 
 const PORT = process.env['PORT'] ?? 3000
 app.listen(PORT, () => {

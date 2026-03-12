@@ -1,6 +1,6 @@
 {
   "name": "ai-sdk-rate-limiter",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Smart rate limiting, queuing, and cost tracking middleware for AI SDK calls. Works across providers.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -66,6 +66,16 @@
         "types": "./dist/statsd.d.cts",
         "default": "./dist/statsd.cjs"
       }
+    },
+    "./middleware": {
+      "import": {
+        "types": "./dist/middleware.d.ts",
+        "default": "./dist/middleware.js"
+      },
+      "require": {
+        "types": "./dist/middleware.d.cts",
+        "default": "./dist/middleware.cjs"
+      }
     }
   },
   "bin": {
@@ -97,6 +107,7 @@
   "license": "MIT",
   "devDependencies": {
     "@ai-sdk/provider": "^3.0.8",
+    "@types/node": "^22.19.15",
     "ai": "^6.0.0",
     "tsup": "^8.5.0",
     "typescript": "^5.8.0",
@@ -104,8 +115,8 @@
   },
   "peerDependencies": {
     "@ai-sdk/provider": ">=1.0.0",
-    "ioredis": ">=4.0.0",
-    "@opentelemetry/api": ">=1.0.0"
+    "@opentelemetry/api": ">=1.0.0",
+    "ioredis": ">=4.0.0"
   },
   "peerDependenciesMeta": {
     "@ai-sdk/provider": {
