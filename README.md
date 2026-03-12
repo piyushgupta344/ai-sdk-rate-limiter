@@ -4,6 +4,7 @@ Smart rate limiting, queuing, and cost tracking for AI API calls. Works across p
 
 [![npm](https://img.shields.io/npm/v/ai-sdk-rate-limiter)](https://www.npmjs.com/package/ai-sdk-rate-limiter)
 [![CI](https://github.com/piyushgupta344/ai-sdk-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/piyushgupta344/ai-sdk-rate-limiter/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/piyushgupta344/ai-sdk-rate-limiter/graph/badge.svg)](https://codecov.io/gh/piyushgupta344/ai-sdk-rate-limiter)
 [![npm downloads](https://img.shields.io/npm/dm/ai-sdk-rate-limiter)](https://www.npmjs.com/package/ai-sdk-rate-limiter)
 [![docs](https://img.shields.io/badge/docs-piyushgupta344.github.io-blue)](https://piyushgupta344.github.io/ai-sdk-rate-limiter/)
 
