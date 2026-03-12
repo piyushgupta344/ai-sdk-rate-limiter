@@ -1431,7 +1431,14 @@ import type { StatsDClient } from 'ai-sdk-rate-limiter/statsd'
 
 ## Examples
 
-A full Next.js 15 App Router example is included at [`examples/nextjs/`](./examples/nextjs/). It demonstrates streaming chat with rate limiting, live cost display, and proper error handling for budget and rate limit errors.
+Four runnable examples are included, each with its own README:
+
+| Example | What it shows |
+|---|---|
+| [`examples/nextjs/`](./examples/nextjs/) | Next.js 15 App Router streaming chat — rate limiting, live cost display, budget error handling |
+| [`examples/multi-tenant-express/`](./examples/multi-tenant-express/) | Express API with per-user isolated limits (free/pro tiers), per-user cost reports, circuit breaker |
+| [`examples/batch-processing/`](./examples/batch-processing/) | Classify 30+ items concurrently without 429s — priority queuing, graceful shutdown, live cost tracking |
+| [`examples/budget-alerts/`](./examples/budget-alerts/) | Slack/webhook alerts on budget thresholds — instant `budgetHit` events + periodic spend summaries |
 
 ---
 
