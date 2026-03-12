@@ -573,4 +573,21 @@ export interface RateLimiter {
    * No-op if no cost store is configured.
    */
   warmUp(): Promise<void>
+
+  /**
+   * Clear all rate-limit, queue, cost, and circuit-breaker state.
+   *
+   * Any currently queued requests are rejected with `ShutdownError`.
+   * After reset, the limiter is fully operational again — no need to
+   * recreate it. Unlike `shutdown()`, reset does not lock the instance.
+   *
+   * Primarily useful in tests to reset between test cases without
+   * constructing a new limiter on each run.
+   *
+   * @example
+   * ```typescript
+   * beforeEach(() => limiter.reset())
+   * ```
+   */
+  reset(): void
 }

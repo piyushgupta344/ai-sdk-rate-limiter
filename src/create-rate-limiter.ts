@@ -94,5 +94,9 @@ export function createRateLimiter(config: RateLimiterConfig = {}): RateLimiter {
     warmUp(): Promise<void> {
       return pipeline.warmUp()
     },
+
+    reset(): void {
+      pipeline.reset()
+    },
   }
 }

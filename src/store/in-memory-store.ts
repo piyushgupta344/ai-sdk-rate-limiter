@@ -272,6 +272,14 @@ export class InMemoryStore implements RateLimitStore {
     return now + WINDOW_MS + 1
   }
 
+  /** Clear all state — useful in tests to reset between runs. */
+  reset(): void {
+    this.windows.clear()
+    this.dailyWindows.clear()
+    this.backoffs.clear()
+    this.pruneCounter = 0
+  }
+
   /**
    * Periodically sweep stale entries from the scope/model maps.
    * Runs every 200 checkAndRecord calls to avoid per-request overhead.

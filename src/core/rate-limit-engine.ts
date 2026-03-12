@@ -267,6 +267,19 @@ export class RateLimitEngine {
   }
 
   /**
+   * Clear all rate-limit state — sliding windows, queues, backoffs.
+   * Queued requests are rejected with ShutdownError before clearing.
+   * Useful in tests to reset between runs without recreating the instance.
+   */
+  reset(): void {
+    this.shutdown()
+    this.localStates.clear()
+    if (this.store instanceof InMemoryStore) {
+      this.store.reset()
+    }
+  }
+
+  /**
    * Immediately reject all queued and concurrency-waiting requests with
    * ShutdownError. Called by Pipeline.shutdown() before draining.
    */

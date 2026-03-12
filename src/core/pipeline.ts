@@ -548,6 +548,22 @@ export class Pipeline {
     }
   }
 
+  /**
+   * Clear all rate-limit, queue, cost, and circuit-breaker state.
+   * Any currently queued requests are rejected with ShutdownError.
+   * Useful in tests to reset between runs without recreating the limiter.
+   */
+  reset(): void {
+    this.engine.reset()
+    this.costTracker.reset()
+    this.keyMeta.clear()
+    this.circuits.clear()
+    this.detectedLimits.clear()
+    this.dedupMap.clear()
+    this.executeCount = 0
+    this.shutdownRequested = false
+  }
+
   /** Pre-load historical cost data from the persistent cost store. */
   async warmUp(): Promise<void> {
     if (this.config.cost?.store) {

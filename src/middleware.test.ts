@@ -32,6 +32,7 @@ function makeLimiter(overrides: Partial<RateLimiter> = {}): RateLimiter {
     off:           vi.fn(),
     shutdown:      vi.fn().mockResolvedValue(undefined),
     warmUp:        vi.fn().mockResolvedValue(undefined),
+    reset:         vi.fn(),
     ...overrides,
   }
 }

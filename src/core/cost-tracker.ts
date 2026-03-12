@@ -247,6 +247,11 @@ export class CostTracker {
     return { hour, day, month, byModel, byScope }
   }
 
+  /** Clear all in-memory cost entries. Useful in tests to reset between runs. */
+  reset(): void {
+    this.entries = []
+  }
+
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
