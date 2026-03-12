@@ -90,7 +90,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
   },
   "keywords": [
     "ai",
@@ -111,6 +114,7 @@
     "ai": "^6.0.0",
     "tsup": "^8.5.0",
     "typescript": "^5.8.0",
+    "vitepress": "^1.6.4",
     "vitest": "^3.0.0"
   },
   "peerDependencies": {
