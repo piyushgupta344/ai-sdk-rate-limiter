@@ -3,6 +3,8 @@
 Smart rate limiting, queuing, and cost tracking for AI API calls. Works across providers. Zero required dependencies.
 
 [![npm](https://img.shields.io/npm/v/ai-sdk-rate-limiter)](https://www.npmjs.com/package/ai-sdk-rate-limiter)
+[![CI](https://github.com/piyushgupta344/ai-sdk-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/piyushgupta344/ai-sdk-rate-limiter/actions/workflows/ci.yml)
+[![npm downloads](https://img.shields.io/npm/dm/ai-sdk-rate-limiter)](https://www.npmjs.com/package/ai-sdk-rate-limiter)
 
 ```
 npm install ai-sdk-rate-limiter
@@ -1566,6 +1568,23 @@ Four runnable examples are included, each with its own README:
 | [`examples/multi-tenant-express/`](./examples/multi-tenant-express/) | Express API with per-user isolated limits (free/pro tiers), per-user cost reports, circuit breaker |
 | [`examples/batch-processing/`](./examples/batch-processing/) | Classify 30+ items concurrently without 429s — priority queuing, graceful shutdown, live cost tracking |
 | [`examples/budget-alerts/`](./examples/budget-alerts/) | Slack/webhook alerts on budget thresholds — instant `budgetHit` events + periodic spend summaries |
+
+---
+
+## Bundle sizes
+
+Each entry point is independently tree-shakeable. Importing `ai-sdk-rate-limiter` never pulls in Redis, Prometheus, OTel, or StatsD.
+
+| Entry point | Size (minified) | Size (gzip) |
+|---|---|---|
+| `ai-sdk-rate-limiter` | ~80 KB | ~22 KB |
+| `ai-sdk-rate-limiter/redis` | ~12 KB | ~4 KB |
+| `ai-sdk-rate-limiter/middleware` | ~8 KB | ~2.5 KB |
+| `ai-sdk-rate-limiter/prometheus` | ~8 KB | ~2.5 KB |
+| `ai-sdk-rate-limiter/otel` | ~4 KB | ~1.5 KB |
+| `ai-sdk-rate-limiter/statsd` | ~4 KB | ~1.2 KB |
+
+The core package is self-contained. Optional peer deps (`ioredis`, `@opentelemetry/api`) are only loaded when you import the corresponding entry point.
 
 ---
 
