@@ -180,6 +180,36 @@ export interface PerRequestOptions {
    * retried (if attempts remain).
    */
   callTimeout?: number
+  /**
+   * Deduplication key. When two concurrent requests share the same key,
+   * only one API call is made and both callers receive the same result.
+   *
+   * Useful for server-side caching of identical prompts fired simultaneously
+   * (e.g. two users asking the same question at the same time).
+   *
+   * @example
+   * providerOptions: { rateLimiter: { dedupKey: `faq:${questionId}` } }
+   */
+  dedupKey?: string
+}
+
+// ---------------------------------------------------------------------------
+// Cost forecast
+// ---------------------------------------------------------------------------
+
+export interface CostForecast {
+  /** USD spent in the current rolling window */
+  spentUsd: number
+  /** Projected total USD spend over the full period, extrapolated from hourly rate */
+  projectedUsd: number
+  /** Current spend rate in USD per hour */
+  ratePerHourUsd: number
+}
+
+export interface CostForecastReport {
+  hour: CostForecast
+  day: CostForecast
+  month: CostForecast
 }
 
 // ---------------------------------------------------------------------------
@@ -469,6 +499,20 @@ export interface RateLimiter {
 
   /** Get a snapshot of cost usage across periods and models */
   getCostReport(): CostReport
+
+  /**
+   * Get a cost forecast based on the current hourly spend rate.
+   *
+   * Projects total spend for the day and month if current rate holds.
+   * Useful for alerting before a budget cap is hit.
+   *
+   * @example
+   * const forecast = limiter.getCostForecast()
+   * if (forecast.day.projectedUsd > 40) {
+   *   alert(`On track to spend $${forecast.day.projectedUsd.toFixed(2)} today`)
+   * }
+   */
+  getCostForecast(): CostForecastReport
 
   /** Get current queue depth and window state per model */
   getStatus(): LimiterStatus

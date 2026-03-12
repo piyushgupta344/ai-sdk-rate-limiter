@@ -557,6 +557,27 @@ Costs are based on **actual token counts** from API responses — not estimates.
 
 `byScope` is populated automatically when requests carry a `scope` (either set on `limiter.wrap()` or via `providerOptions.rateLimiter.scope`). Unscoped requests don't appear in `byScope`.
 
+### Cost forecasting
+
+`getCostForecast()` projects your end-of-period spend based on the current hourly rate. Useful for alerting before a budget cap is hit:
+
+```typescript
+const forecast = limiter.getCostForecast()
+
+console.log(forecast)
+// {
+//   hour:  { spentUsd: 1.20, projectedUsd: 1.20,  ratePerHourUsd: 1.20 },
+//   day:   { spentUsd: 3.50, projectedUsd: 28.80, ratePerHourUsd: 1.20 },
+//   month: { spentUsd: 8.10, projectedUsd: 864,   ratePerHourUsd: 1.20 },
+// }
+
+if (forecast.day.projectedUsd > 40) {
+  console.warn(`Heads up — on track to spend $${forecast.day.projectedUsd.toFixed(2)} today`)
+}
+```
+
+`projectedUsd` = current hourly rate × hours in the period. It is based on the **last 60 minutes** of spend, so it responds quickly to usage spikes.
+
 ---
 
 ## Budget fallback routing
@@ -1455,6 +1476,57 @@ class MyStore implements RateLimitStore {
 
 const limiter = createRateLimiter({ store: new MyStore() })
 ```
+
+### Load balancing across API keys
+
+`createModelPool()` distributes requests round-robin across multiple model instances — useful when you have more than one API key:
+
+```typescript
+import { createRateLimiter, createModelPool } from 'ai-sdk-rate-limiter'
+import { createOpenAI } from '@ai-sdk/openai'
+
+// Two API keys, each with their own limiter tracking separate RPM limits
+const limiter1 = createRateLimiter({ limits: { 'gpt-4o': { rpm: 500, itpm: 2_000_000 } } })
+const limiter2 = createRateLimiter({ limits: { 'gpt-4o': { rpm: 500, itpm: 2_000_000 } } })
+
+const openai1 = createOpenAI({ apiKey: process.env.OPENAI_KEY_1 })
+const openai2 = createOpenAI({ apiKey: process.env.OPENAI_KEY_2 })
+
+const pool = createModelPool([
+  limiter1.wrap(openai1('gpt-4o')),
+  limiter2.wrap(openai2('gpt-4o')),
+])
+
+// Use exactly like a regular model — calls alternate between the two keys
+const { text } = await generateText({ model: pool, prompt: 'Hello!' })
+```
+
+Pass `{ strategy: 'random' }` for random selection instead of round-robin.
+
+### Request deduplication
+
+When multiple concurrent requests carry the same `dedupKey`, only one API call is made and all callers receive the same result. Useful for FAQ-style workloads where many users ask the same question simultaneously:
+
+```typescript
+const model = limiter.wrap(openai('gpt-4o'))
+
+// Server handler — two simultaneous identical requests share one API call
+async function handleRequest(questionId: string) {
+  const { text } = await generateText({
+    model,
+    prompt: questions[questionId],
+    providerOptions: {
+      rateLimiter: { dedupKey: `faq:${questionId}` },
+    },
+  })
+  return text
+}
+
+// If 50 users hit the same FAQ item at the same time → 1 API call, not 50
+const results = await Promise.all(users.map(() => handleRequest('faq-42')))
+```
+
+The dedup entry is removed once the request completes (success or error), so subsequent requests always make a fresh call.
 
 ---
 

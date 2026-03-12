@@ -1,4 +1,4 @@
-import type { CostReport, PeriodCostSummary, BudgetPeriod } from '../types.js'
+import type { CostReport, CostForecastReport, PeriodCostSummary, BudgetPeriod } from '../types.js'
 import type { CostStore } from '../store/cost-store-interface.js'
 import { BudgetExceededError } from '../errors.js'
 
@@ -172,6 +172,41 @@ export class CostTracker {
       (inputTokens / 1_000_000) * inputPricePerMillion +
       (outputTokens / 1_000_000) * outputPricePerMillion
     )
+  }
+
+  getForecast(): CostForecastReport {
+    const now = Date.now()
+    this.evict(now)
+
+    const hourlyRate = this.entries
+      .filter(e => e.timestamp > now - HOUR_MS)
+      .reduce((s, e) => s + e.costUsd, 0)
+
+    const daySpent = this.entries
+      .filter(e => e.timestamp > now - DAY_MS)
+      .reduce((s, e) => s + e.costUsd, 0)
+
+    const monthSpent = this.entries
+      .filter(e => e.timestamp > now - MONTH_MS)
+      .reduce((s, e) => s + e.costUsd, 0)
+
+    return {
+      hour: {
+        spentUsd: hourlyRate,
+        projectedUsd: hourlyRate,
+        ratePerHourUsd: hourlyRate,
+      },
+      day: {
+        spentUsd: daySpent,
+        projectedUsd: hourlyRate * 24,
+        ratePerHourUsd: hourlyRate,
+      },
+      month: {
+        spentUsd: monthSpent,
+        projectedUsd: hourlyRate * 24 * 30,
+        ratePerHourUsd: hourlyRate,
+      },
+    }
   }
 
   getReport(): CostReport {

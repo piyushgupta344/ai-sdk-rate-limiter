@@ -95,6 +95,7 @@ function getPerRequestOptions(
   skipBudgetCheck: boolean
   scope: string | undefined
   callTimeout: number | undefined
+  dedupKey: string | undefined
 } {
   const raw = params.providerOptions?.['rateLimiter'] as (PerRequestOptions & { _skipBudgetCheck?: boolean }) | undefined
   return {
@@ -104,6 +105,7 @@ function getPerRequestOptions(
     skipBudgetCheck: raw?._skipBudgetCheck ?? false,
     scope: raw?.scope,
     callTimeout: raw?.callTimeout,
+    dedupKey: raw?.dedupKey,
   }
 }
 
@@ -133,7 +135,7 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
     // wrapGenerate — non-streaming
     // -----------------------------------------------------------------------
     async wrapGenerate({ doGenerate, params, model }) {
-      const { priority, timeoutMs, skipBudgetCheck, scope, callTimeout } = getPerRequestOptions(params, queueTimeout)
+      const { priority, timeoutMs, skipBudgetCheck, scope, callTimeout, dedupKey } = getPerRequestOptions(params, queueTimeout)
       const modelId  = model.modelId
       const provider = model.provider
       const startMs  = Date.now()
@@ -150,6 +152,7 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
           skipBudgetCheck,
           ...(scope        !== undefined && { scope }),
           ...(callTimeout  !== undefined && { callTimeout }),
+          ...(dedupKey     !== undefined && { dedupKey }),
           ...(params.abortSignal !== undefined && { signal: params.abortSignal }),
         },
       )
@@ -170,7 +173,7 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
     // wrapStream — streaming
     // -----------------------------------------------------------------------
     async wrapStream({ doStream, params, model }) {
-      const { priority, timeoutMs, skipBudgetCheck, scope, callTimeout } = getPerRequestOptions(params, queueTimeout)
+      const { priority, timeoutMs, skipBudgetCheck, scope, callTimeout, dedupKey } = getPerRequestOptions(params, queueTimeout)
       const modelId  = model.modelId
       const provider = model.provider
       const startMs  = Date.now()
@@ -187,6 +190,7 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
           skipBudgetCheck,
           ...(scope       !== undefined && { scope }),
           ...(callTimeout !== undefined && { callTimeout }),
+          ...(dedupKey    !== undefined && { dedupKey }),
           ...(params.abortSignal !== undefined && { signal: params.abortSignal }),
         },
       )

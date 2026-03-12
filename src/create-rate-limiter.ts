@@ -3,6 +3,7 @@ import type {
   RateLimiter,
   Priority,
   CostReport,
+  CostForecastReport,
   LimiterStatus,
   EventMap,
   EventHandler,
@@ -54,6 +55,10 @@ export function createRateLimiter(config: RateLimiterConfig = {}): RateLimiter {
 
     getCostReport(): CostReport {
       return pipeline.getCostReport()
+    },
+
+    getCostForecast(): CostForecastReport {
+      return pipeline.getCostForecast()
     },
 
     getStatus(): LimiterStatus {

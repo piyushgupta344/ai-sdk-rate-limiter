@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.12.0] - 2026-03-12
+
+### Added
+- **`getCostForecast()`** — project end-of-period spend based on the current hourly rate. Returns `{ hour, day, month }` each with `spentUsd`, `projectedUsd`, and `ratePerHourUsd`. Useful for alerting before a budget cap is hit.
+- **`createModelPool(models, options?)`** — round-robin (or random) load balancer across multiple wrapped model instances. Distributes calls evenly across API keys or model variants. Import from `ai-sdk-rate-limiter`.
+- **Request deduplication** — pass `dedupKey` in `providerOptions.rateLimiter` to make concurrent identical requests share a single API call. All callers receive the same result; the dedup entry is cleared on completion so the next request always makes a fresh call.
+
+---
+
 ## [0.11.0] - 2026-03-12
 
 ### Added

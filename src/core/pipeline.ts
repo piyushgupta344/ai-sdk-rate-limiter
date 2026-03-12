@@ -5,6 +5,7 @@ import type {
   ModelLimitOverride,
   ScopeConfig,
   CostReport,
+  CostForecastReport,
   LimiterStatus,
   ModelStatus,
   EventMap,
@@ -92,6 +93,8 @@ export class Pipeline {
   private readonly circuits = new Map<string, CircuitBreaker>()
   /** Limits detected from provider response headers (lower priority than user config) */
   private readonly detectedLimits = new Map<string, ModelLimitOverride>()
+  /** In-flight promises indexed by dedup key, shared across identical concurrent requests */
+  private readonly dedupMap = new Map<string, Promise<unknown>>()
   /** Set to true after shutdown() is called */
   private shutdownRequested = false
   private readonly log: DebugLogger
@@ -161,9 +164,28 @@ export class Pipeline {
       callTimeout?: number
       /** Request metadata forwarded to dropped events */
       metadata?: Record<string, unknown>
+      /** Deduplication key — concurrent requests with the same key share one API call */
+      dedupKey?: string
     },
   ): Promise<T> {
     this.log.log(modelId, 'execute', { provider, priority: opts.priority, ...(opts.scope !== undefined && { scope: opts.scope }) })
+
+    // -----------------------------------------------------------------------
+    // Deduplication — if a matching in-flight request exists, share its result
+    // -----------------------------------------------------------------------
+    if (opts.dedupKey !== undefined) {
+      const existing = this.dedupMap.get(opts.dedupKey) as Promise<T> | undefined
+      if (existing !== undefined) {
+        this.log.log(modelId, 'dedup hit', { dedupKey: opts.dedupKey })
+        return existing
+      }
+      // No existing entry — run and cache. Strip dedupKey so recursive call skips this block.
+      const { dedupKey, ...optsWithoutDedup } = opts
+      const promise = this.execute(modelId, provider, prompt, fn, optsWithoutDedup)
+        .finally(() => { this.dedupMap.delete(dedupKey) })
+      this.dedupMap.set(dedupKey, promise)
+      return promise
+    }
 
     // -----------------------------------------------------------------------
     // 0. Shutdown guard
@@ -423,6 +445,10 @@ export class Pipeline {
 
   getCostReport(): CostReport {
     return this.costTracker.getReport()
+  }
+
+  getCostForecast(): CostForecastReport {
+    return this.costTracker.getForecast()
   }
 
   getStatus(): LimiterStatus {

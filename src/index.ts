@@ -20,6 +20,8 @@
 export { createRateLimiter } from './create-rate-limiter.js'
 export { rateLimited } from './adapters/raw-sdk-proxy.js'
 export type { RawSdkProxyOptions } from './adapters/raw-sdk-proxy.js'
+export { createModelPool } from './adapters/model-pool.js'
+export type { ModelPoolOptions } from './adapters/model-pool.js'
 
 // Errors
 export {
@@ -71,6 +73,8 @@ export type {
 
   // Reports
   CostReport,
+  CostForecast,
+  CostForecastReport,
   PeriodCostSummary,
   LimiterStatus,
   ModelStatus,
