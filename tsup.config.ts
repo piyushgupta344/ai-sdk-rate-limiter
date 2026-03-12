@@ -3,7 +3,7 @@ import { defineConfig } from 'tsup'
 export default defineConfig([
   // Library bundles (ESM + CJS + .d.ts)
   {
-    entry: ['src/index.ts', 'src/redis.ts', 'src/otel.ts', 'src/testing.ts'],
+    entry: ['src/index.ts', 'src/redis.ts', 'src/otel.ts', 'src/testing.ts', 'src/prometheus.ts', 'src/statsd.ts'],
     format: ['esm', 'cjs'],
     dts: true,
     splitting: false,

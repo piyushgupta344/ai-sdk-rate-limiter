@@ -29,6 +29,8 @@ export {
   QueueFullError,
   BudgetExceededError,
   RetryExhaustedError,
+  CircuitOpenError,
+  ShutdownError,
 } from './errors.js'
 
 // Types
@@ -49,6 +51,9 @@ export type {
   // Per-request
   PerRequestOptions,
 
+  // Circuit breaker
+  CircuitBreakerConfig,
+
   // Events
   EventMap,
   EventHandler,
@@ -60,6 +65,9 @@ export type {
   BudgetHitEvent,
   DroppedEvent,
   CompletedEvent,
+  CircuitOpenEvent,
+  CircuitClosedEvent,
+  LimitsDetectedEvent,
 
   // Reports
   CostReport,
@@ -71,8 +79,9 @@ export type {
   RateLimiter,
 } from './types.js'
 
-// Store interface (for custom store implementations)
+// Store interfaces (for custom store implementations)
 export type { RateLimitStore } from './store/interface.js'
+export type { CostStore, PersistedCostEntry } from './store/cost-store-interface.js'
 
 // Registry utilities (useful for extending/inspecting the built-in model data)
 export { resolveModelLimits, isKnownModel } from './registry/index.js'

@@ -94,6 +94,7 @@ function getPerRequestOptions(
   metadata: Record<string, unknown>
   skipBudgetCheck: boolean
   scope: string | undefined
+  callTimeout: number | undefined
 } {
   const raw = params.providerOptions?.['rateLimiter'] as (PerRequestOptions & { _skipBudgetCheck?: boolean }) | undefined
   return {
@@ -102,6 +103,7 @@ function getPerRequestOptions(
     metadata: raw?.metadata ?? {},
     skipBudgetCheck: raw?._skipBudgetCheck ?? false,
     scope: raw?.scope,
+    callTimeout: raw?.callTimeout,
   }
 }
 
@@ -131,10 +133,10 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
     // wrapGenerate — non-streaming
     // -----------------------------------------------------------------------
     async wrapGenerate({ doGenerate, params, model }) {
-      const { priority, timeoutMs, skipBudgetCheck, scope } = getPerRequestOptions(params, queueTimeout)
-      const modelId = model.modelId
+      const { priority, timeoutMs, skipBudgetCheck, scope, callTimeout } = getPerRequestOptions(params, queueTimeout)
+      const modelId  = model.modelId
       const provider = model.provider
-      const startMs = Date.now()
+      const startMs  = Date.now()
 
       const result = await pipeline.execute(
         modelId,
@@ -146,10 +148,15 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
           priority,
           timeoutMs,
           skipBudgetCheck,
-          ...(scope !== undefined && { scope }),
+          ...(scope        !== undefined && { scope }),
+          ...(callTimeout  !== undefined && { callTimeout }),
           ...(params.abortSignal !== undefined && { signal: params.abortSignal }),
         },
       )
+
+      // Auto-detect rate limit caps from response headers
+      const respHeaders = result.response?.headers as Record<string, string> | undefined
+      if (respHeaders) pipeline.updateDetectedLimits(modelId, provider, respHeaders)
 
       const usage = result.usage
         ? extractTokenUsage(result.usage)
@@ -163,10 +170,10 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
     // wrapStream — streaming
     // -----------------------------------------------------------------------
     async wrapStream({ doStream, params, model }) {
-      const { priority, timeoutMs, skipBudgetCheck, scope } = getPerRequestOptions(params, queueTimeout)
-      const modelId = model.modelId
+      const { priority, timeoutMs, skipBudgetCheck, scope, callTimeout } = getPerRequestOptions(params, queueTimeout)
+      const modelId  = model.modelId
       const provider = model.provider
-      const startMs = Date.now()
+      const startMs  = Date.now()
 
       const streamResult = await pipeline.execute(
         modelId,
@@ -178,7 +185,8 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
           priority,
           timeoutMs,
           skipBudgetCheck,
-          ...(scope !== undefined && { scope }),
+          ...(scope       !== undefined && { scope }),
+          ...(callTimeout !== undefined && { callTimeout }),
           ...(params.abortSignal !== undefined && { signal: params.abortSignal }),
         },
       )
@@ -233,11 +241,13 @@ export function createMiddleware(pipeline: Pipeline, queueTimeout: number): Midd
 export function wrapModel(
   model: WrappableModel,
   middleware: Middleware,
-  overrides?: { modelId?: string; providerId?: string; fallback?: WrappableModel; scope?: string },
+  overrides?: { modelId?: string; providerId?: string; fallback?: WrappableModel | WrappableModel[]; scope?: string },
 ): WrappableModel {
   const providerId = overrides?.providerId ?? model.provider
   const modelId = overrides?.modelId ?? model.modelId
-  const fallbackModel = overrides?.fallback
+  const fallbackChain: WrappableModel[] = overrides?.fallback
+    ? Array.isArray(overrides.fallback) ? overrides.fallback : [overrides.fallback]
+    : []
   const staticScope = overrides?.scope
 
   // Inject static scope into params if no per-request scope is set
@@ -270,23 +280,8 @@ export function wrapModel(
           model,
         })
       } catch (err) {
-        if (err instanceof BudgetExceededError && fallbackModel) {
-          const fallbackParams = {
-            ...enrichedParams,
-            providerOptions: {
-              ...enrichedParams.providerOptions,
-              rateLimiter: {
-                ...((enrichedParams.providerOptions?.['rateLimiter'] as Record<string, unknown>) ?? {}),
-                _skipBudgetCheck: true,
-              },
-            },
-          }
-          return middleware.wrapGenerate({
-            doGenerate: () => fallbackModel.doGenerate(fallbackParams),
-            doStream: () => fallbackModel.doStream(fallbackParams),
-            params: fallbackParams,
-            model: fallbackModel,
-          })
+        if (err instanceof BudgetExceededError && fallbackChain.length > 0) {
+          return tryFallbackChainGenerate(fallbackChain, enrichedParams, middleware)
         }
         throw err
       }
@@ -302,26 +297,74 @@ export function wrapModel(
           model,
         })
       } catch (err) {
-        if (err instanceof BudgetExceededError && fallbackModel) {
-          const fallbackParams = {
-            ...enrichedParams,
-            providerOptions: {
-              ...enrichedParams.providerOptions,
-              rateLimiter: {
-                ...((enrichedParams.providerOptions?.['rateLimiter'] as Record<string, unknown>) ?? {}),
-                _skipBudgetCheck: true,
-              },
-            },
-          }
-          return middleware.wrapStream({
-            doGenerate: () => fallbackModel.doGenerate(fallbackParams),
-            doStream: () => fallbackModel.doStream(fallbackParams),
-            params: fallbackParams,
-            model: fallbackModel,
-          })
+        if (err instanceof BudgetExceededError && fallbackChain.length > 0) {
+          return tryFallbackChainStream(fallbackChain, enrichedParams, middleware)
         }
         throw err
       }
     },
   } as WrappableModel
+}
+
+// ---------------------------------------------------------------------------
+// Fallback chain helpers
+// ---------------------------------------------------------------------------
+
+function makeFallbackParams(params: LanguageModelV4CallOptions): LanguageModelV4CallOptions {
+  return {
+    ...params,
+    providerOptions: {
+      ...params.providerOptions,
+      rateLimiter: {
+        ...((params.providerOptions?.['rateLimiter'] as Record<string, unknown>) ?? {}),
+        _skipBudgetCheck: true,
+      },
+    },
+  }
+}
+
+async function tryFallbackChainGenerate(
+  chain: WrappableModel[],
+  params: LanguageModelV4CallOptions,
+  middleware: Middleware,
+): Promise<LanguageModelV4GenerateResult> {
+  const fallbackParams = makeFallbackParams(params)
+  for (let i = 0; i < chain.length; i++) {
+    const fallback = chain[i]!
+    try {
+      return await middleware.wrapGenerate({
+        doGenerate: () => fallback.doGenerate(fallbackParams),
+        doStream:   () => fallback.doStream(fallbackParams),
+        params: fallbackParams,
+        model: fallback,
+      })
+    } catch (err) {
+      if (err instanceof BudgetExceededError && i < chain.length - 1) continue
+      throw err
+    }
+  }
+  throw new Error('Fallback chain exhausted') // unreachable
+}
+
+async function tryFallbackChainStream(
+  chain: WrappableModel[],
+  params: LanguageModelV4CallOptions,
+  middleware: Middleware,
+): Promise<LanguageModelV4StreamResult> {
+  const fallbackParams = makeFallbackParams(params)
+  for (let i = 0; i < chain.length; i++) {
+    const fallback = chain[i]!
+    try {
+      return await middleware.wrapStream({
+        doGenerate: () => fallback.doGenerate(fallbackParams),
+        doStream:   () => fallback.doStream(fallbackParams),
+        params: fallbackParams,
+        model: fallback,
+      })
+    } catch (err) {
+      if (err instanceof BudgetExceededError && i < chain.length - 1) continue
+      throw err
+    }
+  }
+  throw new Error('Fallback chain exhausted') // unreachable
 }

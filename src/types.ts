@@ -80,6 +80,22 @@ export interface CostConfig {
    * Informational only — the actual fallback model is passed to limiter.wrap().
    */
   fallbackModel?: string
+  /**
+   * Pluggable persistent cost store.
+   *
+   * Persists cost entries so budget caps survive process restarts.
+   * Call `limiter.warmUp()` at startup to pre-load historical data.
+   *
+   * @example
+   * ```typescript
+   * import { RedisCostStore } from 'ai-sdk-rate-limiter/redis'
+   * const limiter = createRateLimiter({
+   *   cost: { budget: { daily: 50 }, store: new RedisCostStore(redis) },
+   * })
+   * await limiter.warmUp()
+   * ```
+   */
+  store?: import('./store/cost-store-interface.js').CostStore
 }
 
 export interface QueueConfig {
@@ -110,6 +126,33 @@ export interface RetryConfig {
   parseRetryAfter?: boolean
   /** HTTP status codes that should trigger a retry. Default: [429, 500, 502, 503, 504] */
   retryOn?: number[]
+  /**
+   * Per-call timeout in ms. If the AI API call takes longer than this,
+   * it's abandoned and (if retries remain) retried. Default: none (no timeout).
+   */
+  callTimeout?: number
+}
+
+// ---------------------------------------------------------------------------
+// Circuit breaker
+// ---------------------------------------------------------------------------
+
+export interface CircuitBreakerConfig {
+  /**
+   * Consecutive failures before the circuit opens.
+   * Only 5xx/network errors count; 429s do not.
+   * Default: 5
+   */
+  failureThreshold?: number
+  /**
+   * How long (ms) the circuit stays open before allowing a single probe request.
+   * Default: 60_000
+   */
+  cooldownMs?: number
+  /**
+   * HTTP status codes that trip the circuit. Default: [500, 502, 503, 504]
+   */
+  tripOn?: number[]
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +174,12 @@ export interface PerRequestOptions {
   scope?: string
   /** Arbitrary metadata passed through to event handlers */
   metadata?: Record<string, unknown>
+  /**
+   * Per-call AI API timeout in ms. Overrides config.retry.callTimeout for
+   * this request. If the API call hangs beyond this, it is abandoned and
+   * retried (if attempts remain).
+   */
+  callTimeout?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -183,17 +232,50 @@ export interface BudgetHitEvent {
 export interface DroppedEvent {
   model: string
   provider: string
-  reason: 'queue-full' | 'queue-timeout'
+  reason: 'queue-full' | 'queue-timeout' | 'circuit-open' | 'shutdown'
+  /** ms the request waited in queue before being dropped (queue-timeout only) */
+  waitedMs?: number
+  /** Queue depth at drop time */
+  queueDepth?: number
+  /** Scope key if this was a scoped request */
+  scope?: string
+  /** Request metadata from providerOptions.rateLimiter.metadata */
+  metadata?: Record<string, unknown>
 }
 
 export interface CompletedEvent {
   model: string
   provider: string
+  /** Scope key if this was a scoped request */
+  scope?: string
   inputTokens: number
   outputTokens: number
   costUsd: number
   latencyMs: number
   streaming: boolean
+}
+
+export interface CircuitOpenEvent {
+  model: string
+  provider: string
+  /** Number of consecutive failures that tripped the circuit */
+  failures: number
+  /** ms until the circuit will attempt to re-close */
+  cooldownMs: number
+}
+
+export interface CircuitClosedEvent {
+  model: string
+  provider: string
+}
+
+export interface LimitsDetectedEvent {
+  model: string
+  provider: string
+  /** RPM detected from x-ratelimit-limit-requests header */
+  detectedRpm?: number
+  /** ITPM detected from x-ratelimit-limit-tokens header */
+  detectedItpm?: number
 }
 
 export interface EventMap {
@@ -204,6 +286,9 @@ export interface EventMap {
   budgetHit: BudgetHitEvent
   dropped: DroppedEvent
   completed: CompletedEvent
+  circuitOpen: CircuitOpenEvent
+  circuitClosed: CircuitClosedEvent
+  limitsDetected: LimitsDetectedEvent
 }
 
 export type EventHandler<K extends keyof EventMap> = (event: EventMap[K]) => void
@@ -228,6 +313,8 @@ export interface CostReport {
   day: PeriodCostSummary
   month: PeriodCostSummary
   byModel: Record<string, PeriodCostSummary>
+  /** Cost breakdown by scope (user, org, tenant). Only populated when requests use scopes. */
+  byScope: Record<string, PeriodCostSummary>
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +375,13 @@ export interface RateLimiterConfig {
    */
   scopes?: Record<string, ScopeConfig>
   /**
+   * Circuit breaker configuration.
+   *
+   * Automatically fast-fails requests when a model is consistently returning
+   * 5xx errors, rather than waiting for retries to exhaust.
+   */
+  circuit?: CircuitBreakerConfig
+  /**
    * Pluggable rate-limit window store.
    *
    * Defaults to InMemoryStore (per-process sliding window).
@@ -332,8 +426,14 @@ export interface RateLimiter {
     options?: {
       modelId?: string
       providerId?: string
-      /** Fallback model used when a budget cap is hit and onExceeded is 'fallback'. */
-      fallback?: import('./adapters/vercel-ai-sdk.js').WrappableModel
+      /**
+       * Fallback model (or ordered chain of models) used when the primary
+       * model's budget cap is hit and onExceeded is 'fallback'.
+       *
+       * Pass an array for a fallback chain: if the first fallback's budget is
+       * also exceeded, the next one is tried, and so on.
+       */
+      fallback?: import('./adapters/vercel-ai-sdk.js').WrappableModel | import('./adapters/vercel-ai-sdk.js').WrappableModel[]
       /**
        * Scope key for multi-tenant rate limiting. Each unique scope value gets
        * its own independent rate limit window. Supports wildcard patterns
@@ -389,4 +489,25 @@ export interface RateLimiter {
 
   /** Remove an event listener */
   off<K extends keyof EventMap>(event: K, handler: EventHandler<K>): void
+
+  /**
+   * Gracefully stop the rate limiter.
+   *
+   * - Immediately rejects all queued requests with `ShutdownError`.
+   * - Stops accepting new requests.
+   * - Waits up to `drainMs` (default: 5000) for in-flight requests to complete.
+   * - Resolves once all active requests finish or the drain window expires.
+   */
+  shutdown(opts?: { drainMs?: number }): Promise<void>
+
+  /**
+   * Pre-load historical cost data from the persistent cost store.
+   *
+   * Call once at startup when `config.cost.store` is configured. Loads up to
+   * 30 days of historical entries so budget caps are accurate from the first
+   * request, even after a restart.
+   *
+   * No-op if no cost store is configured.
+   */
+  warmUp(): Promise<void>
 }

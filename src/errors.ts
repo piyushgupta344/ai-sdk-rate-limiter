@@ -82,6 +82,32 @@ export class BudgetExceededError extends RateLimiterError {
 }
 
 /**
+ * Thrown when a request is blocked because the circuit breaker is open.
+ */
+export class CircuitOpenError extends RateLimiterError {
+  constructor(
+    public readonly model: string,
+    public readonly openUntilMs: number,
+  ) {
+    super(
+      `Circuit breaker for model "${model}" is open due to repeated failures. ` +
+        `Requests are blocked until ${new Date(openUntilMs).toISOString()}.`,
+    )
+    this.name = 'CircuitOpenError'
+  }
+}
+
+/**
+ * Thrown when a request arrives after shutdown() has been called.
+ */
+export class ShutdownError extends RateLimiterError {
+  constructor() {
+    super('Rate limiter is shutting down — new requests are not accepted.')
+    this.name = 'ShutdownError'
+  }
+}
+
+/**
  * Thrown when all retry attempts are exhausted.
  */
 export class RetryExhaustedError extends RateLimiterError {

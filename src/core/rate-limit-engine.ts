@@ -1,7 +1,7 @@
 import type { ModelLimits, Priority } from '../types.js'
 import type { RateLimitStore } from '../store/interface.js'
 import { InMemoryStore } from '../store/in-memory-store.js'
-import { QueueTimeoutError, QueueFullError } from '../errors.js'
+import { QueueTimeoutError, QueueFullError, ShutdownError } from '../errors.js'
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -255,6 +255,34 @@ export class RateLimitEngine {
   /** All model keys that have been seen by this engine instance. */
   knownKeys(): string[] {
     return Array.from(this.localStates.keys())
+  }
+
+  /** Total number of in-flight requests across all model keys. */
+  totalActive(): number {
+    let total = 0
+    for (const state of this.localStates.values()) {
+      total += state.activeCount
+    }
+    return total
+  }
+
+  /**
+   * Immediately reject all queued and concurrency-waiting requests with
+   * ShutdownError. Called by Pipeline.shutdown() before draining.
+   */
+  shutdown(): void {
+    const err = new ShutdownError()
+    for (const state of this.localStates.values()) {
+      for (const waiter of state.waiters) {
+        clearTimeout(waiter.timeoutHandle)
+        waiter.reject(err)
+      }
+      state.waiters.length = 0
+      for (const cw of state.concurrencyWaiters) {
+        cw.reject(err)
+      }
+      state.concurrencyWaiters.length = 0
+    }
   }
 
   /**

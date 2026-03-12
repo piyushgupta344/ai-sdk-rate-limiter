@@ -79,5 +79,13 @@ export function createRateLimiter(config: RateLimiterConfig = {}): RateLimiter {
     off<K extends keyof EventMap>(event: K, handler: EventHandler<K>): void {
       pipeline.off(event, handler)
     },
+
+    shutdown(opts?: { drainMs?: number }): Promise<void> {
+      return pipeline.shutdown(opts)
+    },
+
+    warmUp(): Promise<void> {
+      return pipeline.warmUp()
+    },
   }
 }

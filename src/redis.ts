@@ -28,3 +28,7 @@
 export { RedisStore } from './store/redis-store.js'
 export type { RedisClient, RedisStoreOptions } from './store/redis-store.js'
 export type { RateLimitStore } from './store/interface.js'
+
+export { RedisCostStore } from './store/redis-cost-store.js'
+export type { RedisCostStoreOptions } from './store/redis-cost-store.js'
+export type { CostStore, PersistedCostEntry } from './store/cost-store-interface.js'

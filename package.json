@@ -1,6 +1,6 @@
 {
   "name": "ai-sdk-rate-limiter",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Smart rate limiting, queuing, and cost tracking middleware for AI SDK calls. Works across providers.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -45,6 +45,26 @@
       "require": {
         "types": "./dist/testing.d.cts",
         "default": "./dist/testing.cjs"
+      }
+    },
+    "./prometheus": {
+      "import": {
+        "types": "./dist/prometheus.d.ts",
+        "default": "./dist/prometheus.js"
+      },
+      "require": {
+        "types": "./dist/prometheus.d.cts",
+        "default": "./dist/prometheus.cjs"
+      }
+    },
+    "./statsd": {
+      "import": {
+        "types": "./dist/statsd.d.ts",
+        "default": "./dist/statsd.js"
+      },
+      "require": {
+        "types": "./dist/statsd.d.cts",
+        "default": "./dist/statsd.cjs"
       }
     }
   },

@@ -2,6 +2,7 @@ import type {
   RateLimiterConfig,
   Priority,
   ModelLimits,
+  ModelLimitOverride,
   ScopeConfig,
   CostReport,
   LimiterStatus,
@@ -9,17 +10,19 @@ import type {
   EventMap,
   EventHandler,
 } from '../types.js'
-import { BudgetExceededError, QueueTimeoutError } from '../errors.js'
+import { BudgetExceededError, QueueTimeoutError, QueueFullError, CircuitOpenError, ShutdownError } from '../errors.js'
 import { RateLimitEngine } from './rate-limit-engine.js'
 import { CostTracker } from './cost-tracker.js'
 import { Emitter } from './emitter.js'
 import {
   DEFAULT_RETRY_CONFIG,
   withRetry,
+  extractStatus,
   type ResolvedRetryConfig,
 } from './retry-manager.js'
 import { estimateInputTokens } from './token-estimator.js'
 import { resolveModelLimits } from '../registry/index.js'
+import { CircuitBreaker } from './circuit-breaker.js'
 
 interface TokenUsage {
   inputTokens: number
@@ -84,6 +87,12 @@ export class Pipeline {
   private readonly config: RateLimiterConfig
   /** Stable mapping from engine key → parsed metadata for getStatus() */
   private readonly keyMeta = new Map<string, { modelId: string; provider: string; scope?: string }>()
+  /** Circuit breakers per model key (only created if config.circuit is set) */
+  private readonly circuits = new Map<string, CircuitBreaker>()
+  /** Limits detected from provider response headers (lower priority than user config) */
+  private readonly detectedLimits = new Map<string, ModelLimitOverride>()
+  /** Set to true after shutdown() is called */
+  private shutdownRequested = false
 
   constructor(config: RateLimiterConfig) {
     this.config = config
@@ -91,7 +100,9 @@ export class Pipeline {
       maxQueueSize: config.queue?.maxSize ?? 500,
       ...(config.store !== undefined && { store: config.store }),
     })
-    this.costTracker = new CostTracker()
+    this.costTracker = new CostTracker({
+      ...(config.cost?.store !== undefined && { store: config.cost.store }),
+    })
     this.emitter = new Emitter()
     this.retryConfig = resolveRetryConfig(config)
 
@@ -140,14 +151,27 @@ export class Pipeline {
       streaming: boolean
       priority: Priority
       timeoutMs: number
-      /** Skip the budget pre-check — used when executing a fallback model. */
       skipBudgetCheck?: boolean
-      /** Scope key for multi-tenant rate limiting */
       scope?: string
-      /** AbortSignal — cancels a queued request if fired before it executes */
       signal?: AbortSignal
+      /** Per-call AI API timeout in ms (overrides config.retry.callTimeout) */
+      callTimeout?: number
+      /** Request metadata forwarded to dropped events */
+      metadata?: Record<string, unknown>
     },
   ): Promise<T> {
+    // -----------------------------------------------------------------------
+    // 0. Shutdown guard
+    // -----------------------------------------------------------------------
+    if (this.shutdownRequested) {
+      this.emitter.emit('dropped', {
+        model: modelId, provider, reason: 'shutdown',
+        ...(opts.scope !== undefined && { scope: opts.scope }),
+        ...(opts.metadata !== undefined && { metadata: opts.metadata }),
+      })
+      throw new ShutdownError()
+    }
+
     const scope = opts.scope
     const limits = scope
       ? this.resolveScopedLimits(modelId, provider, scope)
@@ -155,7 +179,6 @@ export class Pipeline {
     const estimatedInput = estimateInputTokens(prompt)
     const key = scope ? `${scope}:${provider}:${modelId}` : `${provider}:${modelId}`
 
-    // Track key → metadata for getStatus() — avoids fragile string parsing of scoped keys
     if (!this.keyMeta.has(key)) {
       this.keyMeta.set(key, { modelId, provider, ...(scope !== undefined && { scope }) })
     }
@@ -227,80 +250,109 @@ export class Pipeline {
     }
 
     // -----------------------------------------------------------------------
-    // 2. Acquire rate limit slot
+    // 2. Circuit breaker check (fast-fail if OPEN)
     // -----------------------------------------------------------------------
-    await this.engine.acquire(key, {
-      limits,
-      estimatedInputTokens: estimatedInput,
-      priority: opts.priority,
-      timeoutMs: opts.timeoutMs,
-      ...(opts.signal !== undefined && { signal: opts.signal }),
-      onQueued: (queueDepth, estimatedWaitMs) => {
-        this.emitter.emit('queued', {
-          model: modelId,
-          provider,
-          priority: opts.priority,
-          queueDepth,
-          estimatedWaitMs,
+    const circuit = this.config.circuit ? this.getOrCreateCircuit(key) : undefined
+    if (circuit?.isOpen()) {
+      this.emitter.emit('dropped', {
+        model: modelId, provider, reason: 'circuit-open',
+        ...(scope !== undefined && { scope }),
+        ...(opts.metadata !== undefined && { metadata: opts.metadata }),
+      })
+      throw new CircuitOpenError(modelId, circuit.openUntilMs)
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Acquire rate limit slot
+    // -----------------------------------------------------------------------
+    try {
+      await this.engine.acquire(key, {
+        limits,
+        estimatedInputTokens: estimatedInput,
+        priority: opts.priority,
+        timeoutMs: opts.timeoutMs,
+        ...(opts.signal !== undefined && { signal: opts.signal }),
+        onQueued: (queueDepth, estimatedWaitMs) => {
+          this.emitter.emit('queued', { model: modelId, provider, priority: opts.priority, queueDepth, estimatedWaitMs })
+          this.emitter.emit('rateLimited', { source: 'local', model: modelId, provider, limitType: 'rpm', resetAt: Date.now() + estimatedWaitMs })
+        },
+        onDequeued: (waitedMs) => {
+          this.emitter.emit('dequeued', { model: modelId, provider, waitedMs, priority: opts.priority })
+        },
+      })
+    } catch (acquireErr) {
+      if (acquireErr instanceof QueueFullError) {
+        const maxSize = this.config.queue?.maxSize
+        this.emitter.emit('dropped', {
+          model: modelId, provider, reason: 'queue-full',
+          ...(maxSize !== undefined && { queueDepth: maxSize }),
+          ...(scope !== undefined && { scope }),
+          ...(opts.metadata !== undefined && { metadata: opts.metadata }),
         })
-        this.emitter.emit('rateLimited', {
-          source: 'local',
-          model: modelId,
-          provider,
-          limitType: 'rpm',
-          resetAt: Date.now() + estimatedWaitMs,
+      } else if (acquireErr instanceof QueueTimeoutError) {
+        this.emitter.emit('dropped', {
+          model: modelId, provider, reason: 'queue-timeout',
+          waitedMs: acquireErr.waitedMs, queueDepth: acquireErr.queueDepth,
+          ...(scope !== undefined && { scope }),
+          ...(opts.metadata !== undefined && { metadata: opts.metadata }),
         })
-      },
-      onDequeued: (waitedMs) => {
-        this.emitter.emit('dequeued', {
-          model: modelId,
-          provider,
-          waitedMs,
-          priority: opts.priority,
-        })
-      },
-    })
+      }
+      throw acquireErr
+    }
     slotAcquired = true
 
     // -----------------------------------------------------------------------
-    // 3. Execute with retry
+    // 4. Execute with retry (+ optional per-call timeout)
     // -----------------------------------------------------------------------
+    const callTimeoutMs = opts.callTimeout ?? this.config.retry?.callTimeout
+    const timedFn = callTimeoutMs
+      ? (): Promise<T> =>
+          Promise.race([
+            fn(),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(Object.assign(new Error(`AI call timed out after ${callTimeoutMs}ms`), { name: 'CallTimeoutError' })),
+                callTimeoutMs,
+              ),
+            ),
+          ])
+      : fn
+
     try {
-      const result = await withRetry(fn, this.retryConfig, {
+      const result = await withRetry(timedFn, this.retryConfig, {
         modelId,
         onRetry: ({ attempt, maxAttempts, delayMs, error }) => {
-          this.emitter.emit('retrying', {
-            model: modelId,
-            provider,
-            attempt,
-            maxAttempts,
-            delayMs,
-            error,
-          })
+          this.emitter.emit('retrying', { model: modelId, provider, attempt, maxAttempts, delayMs, error })
         },
         onRateLimited: (retryAfterMs) => {
-          // Propagate the backoff to the engine so queued requests behind this
-          // one also wait — prevents them from all immediately getting 429s too
           this.engine.applyBackoff(key, retryAfterMs)
-          this.emitter.emit('rateLimited', {
-            source: 'remote',
-            model: modelId,
-            provider,
-            limitType: 'rpm',
-            resetAt: Date.now() + retryAfterMs,
-          })
+          this.emitter.emit('rateLimited', { source: 'remote', model: modelId, provider, limitType: 'rpm', resetAt: Date.now() + retryAfterMs })
         },
       })
+
+      if (circuit) {
+        const justClosed = circuit.recordSuccess()
+        if (justClosed) this.emitter.emit('circuitClosed', { model: modelId, provider })
+      }
+
       return result
     } catch (error) {
-      this.emitter.emit('dropped', {
-        model: modelId,
-        provider,
-        reason: 'queue-timeout',
-      })
+      if (circuit) {
+        const status = extractStatus(error)
+        const shouldTrip = status === null || circuit.tripOn.includes(status)
+        if (shouldTrip) {
+          const justOpened = circuit.recordFailure()
+          if (justOpened) {
+            this.emitter.emit('circuitOpen', {
+              model: modelId, provider,
+              failures: this.config.circuit?.failureThreshold ?? 5,
+              cooldownMs: this.config.circuit?.cooldownMs ?? 60_000,
+            })
+          }
+        }
+      }
       throw error
     } finally {
-      // Release concurrency slot whether the request succeeded or failed
       if (slotAcquired) this.engine.release(key)
     }
   }
@@ -326,17 +378,19 @@ export class Pipeline {
     // Update the sliding window with actuals
     this.engine.recordActualUsage(key, usage.inputTokens, usage.outputTokens)
 
-    // Record in cost tracker
+    // Record in cost tracker (with scope for per-tenant attribution)
     const costUsd = this.costTracker.record(
       modelId,
       usage,
       limits.inputPricePerMillion,
       limits.outputPricePerMillion,
+      scope,
     )
 
     this.emitter.emit('completed', {
       model: modelId,
       provider,
+      ...(scope !== undefined && { scope }),
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       costUsd,
@@ -422,10 +476,85 @@ export class Pipeline {
   }
 
   // -------------------------------------------------------------------------
+  // Shutdown / warmUp
+  // -------------------------------------------------------------------------
+
+  /**
+   * Gracefully shut down the pipeline.
+   * Rejects all queued requests, stops accepting new ones, and waits up to
+   * drainMs for in-flight requests to complete.
+   */
+  async shutdown(opts?: { drainMs?: number }): Promise<void> {
+    this.shutdownRequested = true
+    this.engine.shutdown()
+    const drainMs  = opts?.drainMs ?? 5_000
+    const deadline = Date.now() + drainMs
+    while (this.engine.totalActive() > 0 && Date.now() < deadline) {
+      await new Promise<void>(resolve => setTimeout(resolve, 50))
+    }
+  }
+
+  /** Pre-load historical cost data from the persistent cost store. */
+  async warmUp(): Promise<void> {
+    if (this.config.cost?.store) {
+      await this.costTracker.warmUp(this.config.cost.store)
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Auto-detected limits
+  // -------------------------------------------------------------------------
+
+  /**
+   * Update rate limit knowledge from provider response headers.
+   * Auto-detected values are used only for fields the user hasn't explicitly configured.
+   */
+  updateDetectedLimits(modelId: string, provider: string, headers: Record<string, string>): void {
+    const rawRpm  = headers['x-ratelimit-limit-requests']
+    const rawItpm = headers['x-ratelimit-limit-tokens']
+    const detectedRpm  = rawRpm  ? parseInt(rawRpm,  10) : NaN
+    const detectedItpm = rawItpm ? parseInt(rawItpm, 10) : NaN
+
+    if (isNaN(detectedRpm) && isNaN(detectedItpm)) return
+
+    const mapKey  = `${provider}:${modelId}`
+    const current = this.detectedLimits.get(mapKey) ?? {}
+    const updated: ModelLimitOverride = { ...current }
+    if (!isNaN(detectedRpm))  updated.rpm  = detectedRpm
+    if (!isNaN(detectedItpm)) updated.itpm = detectedItpm
+    this.detectedLimits.set(mapKey, updated)
+
+    this.emitter.emit('limitsDetected', {
+      model: modelId, provider,
+      ...((!isNaN(detectedRpm))  && { detectedRpm }),
+      ...((!isNaN(detectedItpm)) && { detectedItpm }),
+    })
+  }
+
+  // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
 
+  private getOrCreateCircuit(key: string): CircuitBreaker {
+    let cb = this.circuits.get(key)
+    if (!cb) {
+      cb = new CircuitBreaker(this.config.circuit ?? {})
+      this.circuits.set(key, cb)
+    }
+    return cb
+  }
+
   private resolveModelLimits(modelId: string, provider: string): ModelLimits {
-    return resolveModelLimits(modelId, provider, this.config.limits ?? {})
+    const base     = resolveModelLimits(modelId, provider, this.config.limits ?? {})
+    const detected = this.detectedLimits.get(`${provider}:${modelId}`)
+    if (!detected) return base
+
+    // User config takes priority over auto-detected, which takes priority over registry
+    const userOverride = this.config.limits?.[modelId] ?? {}
+    return {
+      ...base,
+      ...(!('rpm'  in userOverride) && detected.rpm  !== undefined && { rpm:  detected.rpm }),
+      ...(!('itpm' in userOverride) && detected.itpm !== undefined && { itpm: detected.itpm }),
+    }
   }
 }

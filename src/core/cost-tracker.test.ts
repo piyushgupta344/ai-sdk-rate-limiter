@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { CostTracker } from './cost-tracker.js'
 import { BudgetExceededError } from '../errors.js'
+import type { CostStore, PersistedCostEntry } from '../store/cost-store-interface.js'
 
 describe('CostTracker', () => {
   beforeEach(() => vi.useFakeTimers())
@@ -83,5 +84,58 @@ describe('CostTracker', () => {
 
     const report = tracker.getReport()
     expect(report.month.requests).toBe(29)
+  })
+
+  it('byScope aggregates costs per scope', () => {
+    const tracker = new CostTracker()
+    tracker.record('gpt-4o', { inputTokens: 1_000, outputTokens: 0 }, 2.50, 10.00, 'user:alice')
+    tracker.record('gpt-4o', { inputTokens: 2_000, outputTokens: 0 }, 2.50, 10.00, 'user:bob')
+    tracker.record('gpt-4o', { inputTokens: 500,   outputTokens: 0 }, 2.50, 10.00, 'user:alice')
+
+    const report = tracker.getReport()
+    expect(report.byScope['user:alice']?.requests).toBe(2)
+    expect(report.byScope['user:alice']?.inputTokens).toBe(1_500)
+    expect(report.byScope['user:bob']?.requests).toBe(1)
+    expect(report.byScope['user:bob']?.inputTokens).toBe(2_000)
+  })
+
+  it('byScope does not include unscoped requests', () => {
+    const tracker = new CostTracker()
+    tracker.record('gpt-4o', { inputTokens: 1_000, outputTokens: 0 }, 2.50, 10.00)
+
+    const report = tracker.getReport()
+    expect(Object.keys(report.byScope)).toHaveLength(0)
+  })
+
+  it('warmUp pre-loads entries from persistent store', async () => {
+    const tracker = new CostTracker()
+    const mockStore: CostStore = {
+      append: async () => {},
+      load: async () => ([
+        { timestamp: Date.now() - 1000, model: 'gpt-4o', inputTokens: 500, outputTokens: 100, costUsd: 0.01 },
+        { timestamp: Date.now() - 2000, model: 'gpt-4o', scope: 'user:alice', inputTokens: 200, outputTokens: 50, costUsd: 0.005 },
+      ] satisfies PersistedCostEntry[]),
+    }
+
+    await tracker.warmUp(mockStore)
+    const report = tracker.getReport()
+    expect(report.hour.requests).toBe(2)
+    expect(report.byScope['user:alice']?.requests).toBe(1)
+  })
+
+  it('persists entries to CostStore on record()', async () => {
+    const appended: PersistedCostEntry[] = []
+    const mockStore: CostStore = {
+      append: async (e) => { appended.push(e) },
+      load:   async () => [],
+    }
+    const tracker = new CostTracker({ store: mockStore })
+    tracker.record('gpt-4o', { inputTokens: 100, outputTokens: 20 }, 2.50, 10.00, 'user:test')
+
+    // Give fire-and-forget a tick to resolve
+    await Promise.resolve()
+    expect(appended).toHaveLength(1)
+    expect(appended[0]!.model).toBe('gpt-4o')
+    expect(appended[0]!.scope).toBe('user:test')
   })
 })

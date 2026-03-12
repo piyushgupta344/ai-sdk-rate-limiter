@@ -1,9 +1,11 @@
 import type { CostReport, PeriodCostSummary, BudgetPeriod } from '../types.js'
+import type { CostStore } from '../store/cost-store-interface.js'
 import { BudgetExceededError } from '../errors.js'
 
 interface CostEntry {
   timestamp: number
   model: string
+  scope?: string
   inputTokens: number
   outputTokens: number
   costUsd: number
@@ -21,6 +23,31 @@ const MONTH_MS = 30 * DAY_MS
 export class CostTracker {
   /** Rolling log of all completed requests */
   private entries: CostEntry[] = []
+  private readonly costStore: CostStore | undefined
+
+  constructor(options: { store?: CostStore } = {}) {
+    this.costStore = options.store
+  }
+
+  /**
+   * Pre-load historical cost entries from a persistent store.
+   * Call once at startup so budget caps are accurate after restarts.
+   */
+  async warmUp(store: CostStore): Promise<void> {
+    const sinceMs = Date.now() - MONTH_MS
+    try {
+      const persisted = await store.load(sinceMs)
+      for (const e of persisted) {
+        const entry: CostEntry = e.scope !== undefined
+          ? { timestamp: e.timestamp, model: e.model, scope: e.scope, inputTokens: e.inputTokens, outputTokens: e.outputTokens, costUsd: e.costUsd }
+          : { timestamp: e.timestamp, model: e.model, inputTokens: e.inputTokens, outputTokens: e.outputTokens, costUsd: e.costUsd }
+        this.entries.push(entry)
+      }
+      this.entries.sort((a, b) => a.timestamp - b.timestamp)
+    } catch {
+      // Fail open — cost history not critical for operation
+    }
+  }
 
   /** Check whether a prospective request would bust a budget.
    *  If `budget.onExceeded === 'throw'`, throws BudgetExceededError.
@@ -62,24 +89,37 @@ export class CostTracker {
    *
    * @param inputPricePerMillion  USD per million input tokens
    * @param outputPricePerMillion USD per million output tokens
+   * @param scope                 Optional scope key for multi-tenant attribution
    */
   record(
     model: string,
     usage: TokenUsage,
     inputPricePerMillion: number,
     outputPricePerMillion: number,
+    scope?: string,
   ): number {
+    const now = Date.now()
     const costUsd =
       (usage.inputTokens / 1_000_000) * inputPricePerMillion +
       (usage.outputTokens / 1_000_000) * outputPricePerMillion
 
-    this.entries.push({
-      timestamp: Date.now(),
+    const entry: CostEntry = {
+      timestamp:    now,
       model,
-      inputTokens: usage.inputTokens,
+      inputTokens:  usage.inputTokens,
       outputTokens: usage.outputTokens,
       costUsd,
-    })
+      ...(scope !== undefined && { scope }),
+    }
+    this.entries.push(entry)
+
+    // Fire-and-forget persistence
+    if (this.costStore) {
+      const persistEntry = scope !== undefined
+        ? { timestamp: entry.timestamp, model: entry.model, scope, inputTokens: entry.inputTokens, outputTokens: entry.outputTokens, costUsd: entry.costUsd }
+        : { timestamp: entry.timestamp, model: entry.model, inputTokens: entry.inputTokens, outputTokens: entry.outputTokens, costUsd: entry.costUsd }
+      void this.costStore.append(persistEntry)
+    }
 
     return costUsd
   }
@@ -143,6 +183,8 @@ export class CostTracker {
     const month = this.summarize(now - MONTH_MS, now)
 
     const byModel: Record<string, PeriodCostSummary> = {}
+    const byScope: Record<string, PeriodCostSummary> = {}
+
     for (const entry of this.entries) {
       if (entry.timestamp > now - MONTH_MS) {
         if (!byModel[entry.model]) {
@@ -150,13 +192,24 @@ export class CostTracker {
         }
         const m = byModel[entry.model]!
         m.requests++
-        m.inputTokens += entry.inputTokens
+        m.inputTokens  += entry.inputTokens
         m.outputTokens += entry.outputTokens
-        m.costUsd += entry.costUsd
+        m.costUsd      += entry.costUsd
+
+        if (entry.scope) {
+          if (!byScope[entry.scope]) {
+            byScope[entry.scope] = { requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }
+          }
+          const s = byScope[entry.scope]!
+          s.requests++
+          s.inputTokens  += entry.inputTokens
+          s.outputTokens += entry.outputTokens
+          s.costUsd      += entry.costUsd
+        }
       }
     }
 
-    return { hour, day, month, byModel }
+    return { hour, day, month, byModel, byScope }
   }
 
   // -------------------------------------------------------------------------
