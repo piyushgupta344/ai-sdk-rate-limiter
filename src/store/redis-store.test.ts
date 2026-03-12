@@ -37,7 +37,7 @@ class MockRedis implements RedisClient {
 
   async set(key: string, value: string, exMode?: string, ttlMs?: number): Promise<string | null> {
     const expiresAt = exMode === 'PX' && ttlMs !== undefined ? Date.now() + ttlMs : undefined
-    this.strings.set(key, { value, expiresAt })
+    this.strings.set(key, { value, ...(expiresAt !== undefined && { expiresAt }) })
     return 'OK'
   }
 

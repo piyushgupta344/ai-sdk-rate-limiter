@@ -131,7 +131,7 @@ describe('budget exceeded — onExceeded: throw', () => {
     ).rejects.toThrow(BudgetExceededError)
 
     expect(onBudgetHit).toHaveBeenCalledOnce()
-    const event = onBudgetHit.mock.calls[0][0]
+    const event = onBudgetHit.mock.calls[0]![0]
     expect(event.model).toBe('gpt-4o')
     expect(event.period).toBe('daily')
     expect(event.limitUsd).toBe(1.0)
@@ -171,7 +171,7 @@ describe('budgetHit event — periods', () => {
       limiter.wrap(makeMockModel('gpt-4o', 'openai')).doGenerate(PARAMS),
     ).rejects.toThrow(BudgetExceededError)
 
-    expect(onBudgetHit.mock.calls[0][0].period).toBe('hourly')
+    expect(onBudgetHit.mock.calls[0]![0].period).toBe('hourly')
   })
 
   it('reports "monthly" period when monthly budget is hit', async () => {
@@ -187,7 +187,7 @@ describe('budgetHit event — periods', () => {
       limiter.wrap(makeMockModel('gpt-4o', 'openai')).doGenerate(PARAMS),
     ).rejects.toThrow(BudgetExceededError)
 
-    expect(onBudgetHit.mock.calls[0][0].period).toBe('monthly')
+    expect(onBudgetHit.mock.calls[0]![0].period).toBe('monthly')
   })
 })
 
@@ -241,7 +241,7 @@ describe('budget exceeded — onExceeded: fallback', () => {
     expect(primaryCalls).toHaveLength(0)
     expect(fallbackCalls).toHaveLength(1)
     expect(onBudgetHit).toHaveBeenCalledOnce()
-    expect(onBudgetHit.mock.calls[0][0].usingFallback).toBe(false)
+    expect(onBudgetHit.mock.calls[0]![0].usingFallback).toBe(false)
   })
 
   it('uses fallback for doStream when budget is hit', async () => {

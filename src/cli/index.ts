@@ -104,7 +104,7 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
-  await runAudit({ provider, json })
+  await runAudit({ ...(provider !== undefined && { provider }), json })
 }
 
 main().catch((err: unknown) => {

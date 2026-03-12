@@ -23,7 +23,8 @@ function makeLimiter(overrides: Partial<RateLimiter> = {}): RateLimiter {
   return {
     wrap:          vi.fn(),
     middleware:    {} as never,
-    getCostReport: vi.fn().mockReturnValue({ hour: {}, day: {}, month: {}, byModel: {}, byScope: {} }),
+    getCostReport:    vi.fn().mockReturnValue({ hour: {}, day: {}, month: {}, byModel: {}, byScope: {} }),
+    getCostForecast:  vi.fn().mockReturnValue({ hour: { spentUsd: 0, projectedUsd: 0, ratePerHourUsd: 0 }, day: { spentUsd: 0, projectedUsd: 0, ratePerHourUsd: 0 }, month: { spentUsd: 0, projectedUsd: 0, ratePerHourUsd: 0 } }),
     getStatus:     vi.fn().mockReturnValue({ models: [], totalQueueDepth: 0 } satisfies LimiterStatus),
     estimatedWait: vi.fn().mockResolvedValue(0),
     rawProxy:      vi.fn(),
