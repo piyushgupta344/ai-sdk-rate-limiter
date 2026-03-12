@@ -10,6 +10,7 @@ import type {
 import { Pipeline } from './core/pipeline.js'
 import { createMiddleware, wrapModel, type WrappableModel, type Middleware } from './adapters/vercel-ai-sdk.js'
 import { createRawProxy } from './adapters/raw-sdk-proxy.js'
+import { validateConfig } from './core/config-validator.js'
 
 /**
  * Create a rate limiter instance.
@@ -34,6 +35,7 @@ import { createRawProxy } from './adapters/raw-sdk-proxy.js'
  * ```
  */
 export function createRateLimiter(config: RateLimiterConfig = {}): RateLimiter {
+  validateConfig(config)
   const pipeline = new Pipeline(config)
   const queueTimeout = config.queue?.timeout ?? 30_000
   const middleware = createMiddleware(pipeline, queueTimeout)

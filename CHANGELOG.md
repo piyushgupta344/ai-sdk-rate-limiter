@@ -11,6 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.11.0] - 2026-03-12
+
+### Added
+- **Debug mode** — set `debug: true` on `createRateLimiter()` to enable structured console logging for every rate-limit decision, queue entry/exit, slot acquisition, circuit breaker state change, and cost recording. Zero overhead when disabled.
+- **Config validation** — `createRateLimiter()` now validates your config at construction time and emits `console.warn` for common misconfigurations:
+  - `cost.store` set without calling `warmUp()` reminder
+  - `circuit.failureThreshold < 3` (too sensitive, risks false trips)
+  - `retry.retryOn` explicitly excludes 429 (defeats rate-limit retry)
+  - `queue.timeout < 3000ms` (too short, requests will time out before serving)
+  - `cost.budget` set without `onExceeded` (uses silent default `'throw'`)
+  - `cost.onExceeded: 'fallback'` reminder to configure fallback model
+- GitHub Actions CI workflow (Node 18 / 20 / 22 matrix)
+- `CHANGELOG.md` with retroactive entries from v0.1.0
+
+### Fixed
+- `DebugLogger` details serialization: empty objects no longer emit trailing `()`
+
+---
+
 ## [0.10.0] - 2026-03-12
 
 ### Added

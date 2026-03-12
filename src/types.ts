@@ -399,6 +399,25 @@ export interface RateLimiterConfig {
    * ```
    */
   store?: import('./store/interface.js').RateLimitStore
+
+  /**
+   * Enable debug logging to console.
+   *
+   * Logs every rate-limit decision, queue entry/exit, slot acquisition,
+   * circuit breaker state change, and cost recording.
+   * Useful for understanding why requests are being held or dropped.
+   *
+   * @default false
+   *
+   * @example
+   * ```typescript
+   * const limiter = createRateLimiter({ debug: true })
+   * // [ai-sdk-rate-limiter] gpt-4o: queuing (rpm=500/500, estimatedWait=1200ms)
+   * // [ai-sdk-rate-limiter] gpt-4o: slot acquired (waited=1187ms, priority="normal")
+   * // [ai-sdk-rate-limiter] gpt-4o: completed (tokens=342+87, cost=$0.000021, latency=1343ms)
+   * ```
+   */
+  debug?: boolean
 }
 
 // ---------------------------------------------------------------------------

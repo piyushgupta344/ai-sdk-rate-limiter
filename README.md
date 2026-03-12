@@ -1478,6 +1478,42 @@ const limiter = createRateLimiter({ store: new MyStore() })
 
 ---
 
+## Debug mode
+
+Set `debug: true` to enable structured console logging for every rate-limit decision, queue entry/exit, slot acquisition, circuit breaker transition, and completed call cost:
+
+```typescript
+const limiter = createRateLimiter({ debug: true })
+```
+
+Sample output:
+
+```
+[ai-sdk-rate-limiter] gpt-4o: execute (provider="openai" priority="normal")
+[ai-sdk-rate-limiter] gpt-4o: queuing (queueDepth=3 estimatedWaitMs=1200 priority="normal")
+[ai-sdk-rate-limiter] gpt-4o: dequeued (waitedMs=1187 priority="normal")
+[ai-sdk-rate-limiter] gpt-4o: completed (tokens=342+87 costUsd=0.000021 latencyMs=1343 streaming=false)
+```
+
+Debug logging is completely zero-overhead when disabled — no string building, no `JSON.stringify`, no property access on the details object.
+
+---
+
+## Config validation
+
+`createRateLimiter()` validates your configuration at construction time. If it spots a likely misconfiguration it logs a `console.warn` (never throws). Catches you've got covered:
+
+| Issue | Warning |
+|---|---|
+| `cost.store` set but `warmUp()` never called | Reminds you to call `warmUp()` at startup |
+| `circuit.failureThreshold < 3` | Too sensitive — risks false trips on transient errors |
+| `retry.retryOn` excludes 429 | Rate-limit errors won't be retried |
+| `queue.timeout < 3000ms` | Requests will time out before they can be served |
+| `cost.budget` set without `onExceeded` | Silent default is `'throw'` — may want `'queue'` or `'fallback'` |
+| `cost.onExceeded: 'fallback'` | Reminds you to pass a `fallback` model to `limiter.wrap()` |
+
+---
+
 ## Comparison
 
 | | ai-sdk-rate-limiter | bottleneck | p-limit | SDK built-in retry | LangChain |

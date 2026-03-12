@@ -23,6 +23,7 @@ import {
 import { estimateInputTokens } from './token-estimator.js'
 import { resolveModelLimits } from '../registry/index.js'
 import { CircuitBreaker } from './circuit-breaker.js'
+import { DebugLogger } from './debug-logger.js'
 
 interface TokenUsage {
   inputTokens: number
@@ -93,9 +94,11 @@ export class Pipeline {
   private readonly detectedLimits = new Map<string, ModelLimitOverride>()
   /** Set to true after shutdown() is called */
   private shutdownRequested = false
+  private readonly log: DebugLogger
 
   constructor(config: RateLimiterConfig) {
     this.config = config
+    this.log = new DebugLogger(config.debug === true)
     this.engine = new RateLimitEngine({
       maxQueueSize: config.queue?.maxSize ?? 500,
       ...(config.store !== undefined && { store: config.store }),
@@ -160,6 +163,8 @@ export class Pipeline {
       metadata?: Record<string, unknown>
     },
   ): Promise<T> {
+    this.log.log(modelId, 'execute', { provider, priority: opts.priority, ...(opts.scope !== undefined && { scope: opts.scope }) })
+
     // -----------------------------------------------------------------------
     // 0. Shutdown guard
     // -----------------------------------------------------------------------
@@ -273,10 +278,12 @@ export class Pipeline {
         timeoutMs: opts.timeoutMs,
         ...(opts.signal !== undefined && { signal: opts.signal }),
         onQueued: (queueDepth, estimatedWaitMs) => {
+          this.log.log(modelId, 'queuing', { queueDepth, estimatedWaitMs, priority: opts.priority })
           this.emitter.emit('queued', { model: modelId, provider, priority: opts.priority, queueDepth, estimatedWaitMs })
           this.emitter.emit('rateLimited', { source: 'local', model: modelId, provider, limitType: 'rpm', resetAt: Date.now() + estimatedWaitMs })
         },
         onDequeued: (waitedMs) => {
+          this.log.log(modelId, 'dequeued', { waitedMs, priority: opts.priority })
           this.emitter.emit('dequeued', { model: modelId, provider, waitedMs, priority: opts.priority })
         },
       })
@@ -332,7 +339,10 @@ export class Pipeline {
 
       if (circuit) {
         const justClosed = circuit.recordSuccess()
-        if (justClosed) this.emitter.emit('circuitClosed', { model: modelId, provider })
+        if (justClosed) {
+          this.log.log(modelId, 'circuit closed — upstream recovered')
+          this.emitter.emit('circuitClosed', { model: modelId, provider })
+        }
       }
 
       return result
@@ -343,6 +353,7 @@ export class Pipeline {
         if (shouldTrip) {
           const justOpened = circuit.recordFailure()
           if (justOpened) {
+            this.log.log(modelId, 'circuit OPEN', { status, cooldownMs: this.config.circuit?.cooldownMs ?? 60_000 })
             this.emitter.emit('circuitOpen', {
               model: modelId, provider,
               failures: this.config.circuit?.failureThreshold ?? 5,
@@ -387,6 +398,13 @@ export class Pipeline {
       scope,
     )
 
+    this.log.log(modelId, 'completed', {
+      tokens: `${usage.inputTokens}+${usage.outputTokens}`,
+      costUsd: costUsd.toFixed(6),
+      latencyMs,
+      streaming,
+      ...(scope !== undefined && { scope }),
+    })
     this.emitter.emit('completed', {
       model: modelId,
       provider,
