@@ -95,6 +95,8 @@ export class Pipeline {
   private readonly detectedLimits = new Map<string, ModelLimitOverride>()
   /** In-flight promises indexed by dedup key, shared across identical concurrent requests */
   private readonly dedupMap = new Map<string, Promise<unknown>>()
+  /** Counter used to trigger periodic keyMeta GC without a setInterval */
+  private executeCount = 0
   /** Set to true after shutdown() is called */
   private shutdownRequested = false
   private readonly log: DebugLogger
@@ -309,6 +311,11 @@ export class Pipeline {
           this.emitter.emit('dequeued', { model: modelId, provider, waitedMs, priority: opts.priority })
         },
       })
+
+      // Prune stale keyMeta entries every 1000 acquired slots.
+      // Done after acquire so the current request's window entry already exists,
+      // preventing it from being mistakenly evicted.
+      if (++this.executeCount % 1_000 === 0) this.pruneKeyMeta()
     } catch (acquireErr) {
       if (acquireErr instanceof QueueFullError) {
         const maxSize = this.config.queue?.maxSize
@@ -467,6 +474,9 @@ export class Pipeline {
       const queueDepth = this.engine.queueDepth(key)
       const backoffUntil = this.engine.backoffUntil(key)
 
+      // Skip fully idle keys — no recent window activity, nothing queued, no backoff
+      if (snapshot.requests === 0 && queueDepth === 0 && backoffUntil === null) continue
+
       totalQueueDepth += queueDepth
       models.push({
         modelId,
@@ -578,6 +588,22 @@ export class Pipeline {
   // -------------------------------------------------------------------------
   // Private helpers
   // -------------------------------------------------------------------------
+
+  /**
+   * Remove keyMeta entries for keys that have no recent activity.
+   * A key is safe to evict when its sliding window is empty (all entries
+   * older than 60s) and it has no queued or in-flight requests.
+   * Called every 1000 executions — no setInterval, no GC interference.
+   */
+  private pruneKeyMeta(): void {
+    for (const key of this.keyMeta.keys()) {
+      const snapshot = this.engine.windowSnapshot(key)
+      const queueDepth = this.engine.queueDepth(key)
+      if (snapshot.requests === 0 && queueDepth === 0) {
+        this.keyMeta.delete(key)
+      }
+    }
+  }
 
   private getOrCreateCircuit(key: string): CircuitBreaker {
     let cb = this.circuits.get(key)
