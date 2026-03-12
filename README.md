@@ -83,6 +83,8 @@ The wrapped model is a drop-in replacement. Every Vercel AI SDK feature — stre
 
 **Fallback chains** — `fallback` now accepts an array of models. On `BudgetExceededError`, the chain is walked in order until one succeeds.
 
+**Express / Hono middleware** — `createRateLimiterMiddleware()` (from `ai-sdk-rate-limiter/middleware`) attaches `req.rateLimiter` to every request and converts rate-limiter errors to proper HTTP responses at the middleware layer — no per-route boilerplate.
+
 **OpenTelemetry** — Drop-in OTel plugin that emits GenAI-spec spans for every request. Works with any OTel-compatible tracer.
 
 **Testing utilities** — `createTestLimiter()` records every completed call so you can assert on model usage, token counts, and costs in unit tests.
@@ -109,6 +111,7 @@ The wrapped model is a drop-in replacement. Every Vercel AI SDK feature — stre
 - [Graceful shutdown](#graceful-shutdown)
 - [Prometheus metrics](#prometheus-metrics)
 - [StatsD metrics](#statsD-metrics)
+- [Express / Hono middleware](#express--hono-middleware)
 - [Events](#events)
 - [Backpressure](#backpressure)
 - [Error handling](#error-handling)
@@ -858,6 +861,121 @@ const client: StatsDClient = {
 
 ---
 
+## Express / Hono middleware
+
+The `ai-sdk-rate-limiter/middleware` entry point eliminates per-route boilerplate. Scope extraction, priority assignment, and rate-limiter error handling all move to the middleware layer — route handlers just pass `req.rateLimiter` through.
+
+### Express
+
+```typescript
+import { createRateLimiterMiddleware } from 'ai-sdk-rate-limiter/middleware'
+
+const { middleware, errorHandler } = createRateLimiterMiddleware(limiter, {
+  // Extract scope from the request — stored in req.rateLimiter.scope
+  scope: (req) => {
+    const plan = req.headers['x-user-plan'] ?? 'free'
+    const id   = req.headers['x-user-id']
+    return id ? `user:${plan}:${id}` : undefined
+  },
+
+  // Derive queue priority per-request
+  priority: (req) => req.headers['x-user-plan'] === 'pro' ? 'normal' : 'low',
+
+  // Add X-RateLimit-* informational headers to every response
+  injectHeaders: 'gpt-4o-mini',
+})
+
+app.use(middleware)    // BEFORE routes
+
+app.post('/chat', async (req, res) => {
+  const { text } = await generateText({
+    model,
+    prompt: req.body.message,
+    // req.rateLimiter already has scope + priority — just pass it through
+    providerOptions: { rateLimiter: req.rateLimiter },
+  })
+  res.json({ text })
+})
+
+app.use(errorHandler)  // AFTER routes
+```
+
+The `errorHandler` converts every `RateLimiterError` to a typed HTTP response automatically — no try/catch needed in route handlers:
+
+| Error | HTTP status | `code` |
+|---|---|---|
+| `QueueTimeoutError` | 503 | `QUEUE_TIMEOUT` |
+| `QueueFullError` | 503 | `QUEUE_FULL` |
+| `CircuitOpenError` | 503 | `CIRCUIT_OPEN` |
+| `ShutdownError` | 503 | `SHUTDOWN` |
+| `BudgetExceededError` | 402 | `BUDGET_EXCEEDED` |
+| `RateLimiterError` (generic) | 429 | `RATE_LIMITED` |
+
+Non-rate-limiter errors are passed to the next error handler unchanged.
+
+### Hono
+
+```typescript
+import { createHonoMiddleware } from 'ai-sdk-rate-limiter/middleware'
+
+app.use(createHonoMiddleware(limiter, {
+  scope:    (c) => c.req.header('x-user-id'),
+  priority: (c) => c.req.header('x-plan') === 'pro' ? 'normal' : 'low',
+}))
+
+app.post('/chat', async (c) => {
+  const { text } = await generateText({
+    model,
+    prompt: await c.req.text(),
+    providerOptions: { rateLimiter: c.var.rateLimiter },
+  })
+  return c.json({ text })
+})
+```
+
+`createHonoMiddleware` wraps the `next()` call in a try/catch, so `RateLimiterErrors` thrown inside route handlers are caught and returned as JSON responses automatically.
+
+### Standalone error handler
+
+If you only need error handling without scope injection:
+
+```typescript
+import { createRateLimiterErrorHandler } from 'ai-sdk-rate-limiter/middleware'
+
+app.use(createRateLimiterErrorHandler({
+  includeDetails: false, // omit retryAfter, period, limitUsd from response body
+}))
+```
+
+### Custom framework (Fastify, etc.)
+
+`mapErrorToResponse` is exported for frameworks that don't use the `(req, res, next)` convention:
+
+```typescript
+import { mapErrorToResponse } from 'ai-sdk-rate-limiter/middleware'
+import { RateLimiterError } from 'ai-sdk-rate-limiter'
+
+// Fastify onError hook
+fastify.setErrorHandler((err, request, reply) => {
+  if (err instanceof RateLimiterError) {
+    const { status, body } = mapErrorToResponse(err)
+    return reply.status(status).send(body)
+  }
+  reply.send(err)
+})
+```
+
+### `req.rateLimiter` TypeScript type
+
+The middleware augments `http.IncomingMessage` so `req.rateLimiter` is typed in Express and Fastify without any additional setup:
+
+```typescript
+import type { RateLimiterRequestContext } from 'ai-sdk-rate-limiter/middleware'
+// req.rateLimiter is automatically typed as RateLimiterRequestContext | undefined
+```
+
+---
+
 ## Events
 
 All events are typed. Register handlers at creation time or dynamically:
@@ -1382,6 +1500,7 @@ const limiter = createRateLimiter({ store: new MyStore() })
 | Backoff propagation | yes | no | no | no | no |
 | Prometheus metrics | yes | no | no | no | no |
 | StatsD metrics | yes | no | no | no | no |
+| Express/Hono middleware | yes | no | no | no | no |
 | OpenTelemetry | yes | no | no | no | partial |
 | Testing utilities | yes | no | no | no | no |
 | CLI audit | yes | no | no | no | no |
@@ -1425,6 +1544,14 @@ import type {
 } from 'ai-sdk-rate-limiter/redis'
 
 import type { StatsDClient } from 'ai-sdk-rate-limiter/statsd'
+
+import type {
+  RateLimiterRequestContext,
+  RateLimiterMiddlewareOptions,
+  ErrorHandlerOptions,
+  HonoMiddlewareOptions,
+  HonoContext,
+} from 'ai-sdk-rate-limiter/middleware'
 ```
 
 ---
