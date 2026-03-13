@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      dev-tooling:
+        patterns:
+          - "typescript"
+          - "tsup"
+          - "vitest"
+          - "@vitest/*"
+          - "vitepress"
+          - "@types/*"
+    ignore:
+      # Only accept patch updates for AI SDK peer deps — minor/major may break API
+      - dependency-name: "@ai-sdk/provider"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "ai"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday

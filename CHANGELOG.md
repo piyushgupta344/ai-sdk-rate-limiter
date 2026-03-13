@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`limiter.reset()`** — clear all rate-limit, queue, cost, and circuit-breaker state without recreating the instance. Queued requests are rejected with `ShutdownError`. Primarily useful in tests to reset between cases with a shared limiter instance.
+- **`queue.onFull: 'drop-low'`** fully implemented — when the queue is at capacity and a `high` or `normal` priority request arrives, the tail `low`-priority waiter is evicted (rejected with `QueueFullError`) to make room. Useful for mixed workloads where background batch jobs should never block user-facing requests.
+
+### Changed
+- Unknown models with zero pricing now emit a one-time `console.warn` on first use, pointing at the exact `config.limits` fix needed to enable cost tracking. Known registry models and models with user-supplied pricing are silent.
+
 ---
 
 ## [0.12.0] - 2026-03-12

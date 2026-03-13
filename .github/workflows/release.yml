@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write  # create GitHub Release
+  id-token: write  # npm provenance
+
+jobs:
+  release:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify package contents
+        run: |
+          npm pack --dry-run
+          # Fail if dist/ is missing from pack output
+          npm pack --dry-run 2>&1 | grep -q "dist/" || (echo "ERROR: dist/ not in pack output" && exit 1)
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '')
+            const version = tag.replace('v', '')
+
+            // Extract release notes from CHANGELOG.md for this version
+            const fs = require('fs')
+            const changelog = fs.readFileSync('CHANGELOG.md', 'utf8')
+            const versionHeader = `## [${version}]`
+            const start = changelog.indexOf(versionHeader)
+            let notes = ''
+            if (start !== -1) {
+              const end = changelog.indexOf('\n## [', start + 1)
+              notes = end !== -1
+                ? changelog.slice(start, end).trim()
+                : changelog.slice(start).trim()
+            }
+
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: tag,
+              body: notes || `Release ${tag}`,
+              draft: false,
+              prerelease: tag.includes('-'),
+            })

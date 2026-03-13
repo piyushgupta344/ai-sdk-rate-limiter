@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://piyushgupta344.github.io/ai-sdk-rate-limiter/
+    about: Check the docs first — the answer is often there.
+  - name: Discussions
+    url: https://github.com/piyushgupta344/ai-sdk-rate-limiter/discussions
+    about: General questions and usage help.

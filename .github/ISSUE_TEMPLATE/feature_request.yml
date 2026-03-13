@@ -1,0 +1,39 @@
+name: Feature Request
+description: Propose a new feature or improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening, search existing issues to avoid duplicates.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the concrete problem you are running into, not just the solution you want.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would the API or behavior look like? Code snippets are helpful.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Other approaches you thought about and why you prefer this one.
+
+  - type: dropdown
+    id: importance
+    attributes:
+      label: How important is this to your use case?
+      options:
+        - Nice to have
+        - Important — I have a workaround
+        - Blocking — no reasonable workaround
+    validations:
+      required: true
