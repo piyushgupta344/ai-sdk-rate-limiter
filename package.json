@@ -123,13 +123,13 @@
   "license": "MIT",
   "devDependencies": {
     "@ai-sdk/provider": "^3.0.8",
-    "@types/node": "^22.19.15",
-    "@vitest/coverage-v8": "^3.2.4",
+    "@types/node": "^25.5.0",
+    "@vitest/coverage-v8": "^4.1.0",
     "ai": "^6.0.0",
     "tsup": "^8.5.0",
     "typescript": "^5.8.0",
     "vitepress": "^1.6.4",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.0"
   },
   "peerDependencies": {
     "@ai-sdk/provider": ">=1.0.0",
