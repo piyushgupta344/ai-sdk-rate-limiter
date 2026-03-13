@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.13.0] - 2026-03-13
+
 ### Added
 - **`limiter.reset()`** — clear all rate-limit, queue, cost, and circuit-breaker state without recreating the instance. Queued requests are rejected with `ShutdownError`. Primarily useful in tests to reset between cases with a shared limiter instance.
 - **`queue.onFull: 'drop-low'`** fully implemented — when the queue is at capacity and a `high` or `normal` priority request arrives, the tail `low`-priority waiter is evicted (rejected with `QueueFullError`) to make room. Useful for mixed workloads where background batch jobs should never block user-facing requests.
