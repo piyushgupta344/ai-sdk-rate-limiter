@@ -103,6 +103,7 @@ export class RateLimitEngine {
       priority: Priority
       timeoutMs: number
       signal?: AbortSignal
+      onFull?: 'throw' | 'drop-low'
       onQueued?: (queueDepth: number, estimatedWaitMs: number) => void
       onDequeued?: (waitedMs: number) => void
     },
@@ -129,7 +130,20 @@ export class RateLimitEngine {
     if (nextSlotAtMs > Date.now()) {
       // Rate limited — queue the request
       if (local.waiters.length >= this.maxQueueSize) {
-        throw new QueueFullError(key, this.maxQueueSize)
+        if (opts.onFull === 'drop-low' && opts.priority !== 'low') {
+          // Evict the lowest-priority waiter (sorted array — it's at the end)
+          const lastIdx = local.waiters.length - 1
+          const victim = local.waiters[lastIdx]
+          if (victim !== undefined && victim.priority === 'low') {
+            local.waiters.splice(lastIdx, 1)
+            victim.reject(new QueueFullError(key, this.maxQueueSize))
+            // Fall through — there's now room for the incoming request
+          } else {
+            throw new QueueFullError(key, this.maxQueueSize)
+          }
+        } else {
+          throw new QueueFullError(key, this.maxQueueSize)
+        }
       }
 
       const estimatedWaitMs = Math.max(0, nextSlotAtMs - Date.now())

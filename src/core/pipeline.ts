@@ -307,6 +307,7 @@ export class Pipeline {
         priority: opts.priority,
         timeoutMs: opts.timeoutMs,
         ...(opts.signal !== undefined && { signal: opts.signal }),
+        ...(this.config.queue?.onFull !== undefined && { onFull: this.config.queue.onFull }),
         onQueued: (queueDepth, estimatedWaitMs) => {
           this.log.log(modelId, 'queuing', { queueDepth, estimatedWaitMs, priority: opts.priority })
           this.emitter.emit('queued', { model: modelId, provider, priority: opts.priority, queueDepth, estimatedWaitMs })
