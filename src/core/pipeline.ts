@@ -25,6 +25,10 @@ import { estimateInputTokens } from './token-estimator.js'
 import { resolveModelLimits } from '../registry/index.js'
 import { CircuitBreaker } from './circuit-breaker.js'
 import { DebugLogger } from './debug-logger.js'
+import { isKnownModel } from '../registry/index.js'
+
+const WARN_PREFIX = '\x1b[33m⚠ ai-sdk-rate-limiter\x1b[0m'
+const WARN_RESET  = '\x1b[0m'
 
 interface TokenUsage {
   inputTokens: number
@@ -99,6 +103,8 @@ export class Pipeline {
   private executeCount = 0
   /** Set to true after shutdown() is called */
   private shutdownRequested = false
+  /** Models that have already received an "unknown model" warning (dedup) */
+  private readonly warnedModels = new Set<string>()
   private readonly log: DebugLogger
 
   constructor(config: RateLimiterConfig) {
@@ -560,6 +566,7 @@ export class Pipeline {
     this.circuits.clear()
     this.detectedLimits.clear()
     this.dedupMap.clear()
+    this.warnedModels.clear()
     this.executeCount = 0
     this.shutdownRequested = false
   }
@@ -633,14 +640,37 @@ export class Pipeline {
   private resolveModelLimits(modelId: string, provider: string): ModelLimits {
     const base     = resolveModelLimits(modelId, provider, this.config.limits ?? {})
     const detected = this.detectedLimits.get(`${provider}:${modelId}`)
-    if (!detected) return base
+    const limits   = detected ? (() => {
+      // User config takes priority over auto-detected, which takes priority over registry
+      const userOverride = this.config.limits?.[modelId] ?? {}
+      return {
+        ...base,
+        ...(!('rpm'  in userOverride) && detected.rpm  !== undefined && { rpm:  detected.rpm }),
+        ...(!('itpm' in userOverride) && detected.itpm !== undefined && { itpm: detected.itpm }),
+      }
+    })() : base
 
-    // User config takes priority over auto-detected, which takes priority over registry
-    const userOverride = this.config.limits?.[modelId] ?? {}
-    return {
-      ...base,
-      ...(!('rpm'  in userOverride) && detected.rpm  !== undefined && { rpm:  detected.rpm }),
-      ...(!('itpm' in userOverride) && detected.itpm !== undefined && { itpm: detected.itpm }),
+    // Warn once when a model is completely unknown and has no user-supplied pricing.
+    // Silent zero-cost tracking is the most common source of confusion with unknown models.
+    const warnKey = `${provider}:${modelId}`
+    if (
+      !this.warnedModels.has(warnKey) &&
+      !isKnownModel(modelId, provider) &&
+      limits.inputPricePerMillion === 0 &&
+      limits.outputPricePerMillion === 0 &&
+      !(this.config.limits?.[modelId]?.inputPricePerMillion !== undefined ||
+        this.config.limits?.[modelId]?.outputPricePerMillion !== undefined)
+    ) {
+      this.warnedModels.add(warnKey)
+      console.warn(
+        `${WARN_PREFIX}: Unknown model '${modelId}' (provider: '${provider}').` +
+        ` Using fallback limits (${limits.rpm} RPM). Cost tracking is disabled.` +
+        `\n  Add pricing to config.limits to enable it:` +
+        `\n  limits: { '${modelId}': { inputPricePerMillion: <n>, outputPricePerMillion: <n> } }` +
+        WARN_RESET,
+      )
     }
+
+    return limits
   }
 }
