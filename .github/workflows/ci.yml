@@ -61,3 +61,7 @@ jobs:
           echo "$PACK_OUTPUT" | grep -q "README.md"         || (echo "MISSING: README.md"          && exit 1)
           echo "$PACK_OUTPUT" | grep -q "LICENSE"           || (echo "MISSING: LICENSE"            && exit 1)
           echo "Package contents verified."
+
+      - name: Build docs
+        if: matrix.node-version == '22'
+        run: npm run docs:build

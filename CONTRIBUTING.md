@@ -10,7 +10,7 @@ Thank you for taking the time to contribute.
 
 ## Setup
 
-Requires Node.js 18+.
+Requires Node.js 20+ (dev tooling — vitest, rolldown — requires Node 20).
 
 ```bash
 git clone https://github.com/piyushgupta344/ai-sdk-rate-limiter.git
