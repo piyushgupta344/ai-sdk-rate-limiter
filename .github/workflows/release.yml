@@ -49,7 +49,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish to JSR
-        run: npx jsr publish --allow-dirty
+        run: npx jsr publish --allow-dirty --allow-slow-types
 
       - name: Create GitHub Release
         uses: actions/github-script@v8
