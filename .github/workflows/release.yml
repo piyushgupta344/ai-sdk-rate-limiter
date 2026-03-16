@@ -44,7 +44,13 @@ jobs:
           npm pack --dry-run 2>&1 | grep -q "dist/" || (echo "ERROR: dist/ not in pack output" && exit 1)
 
       - name: Publish to npm
-        run: npm publish --provenance --access public
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "ai-sdk-rate-limiter@$VERSION" version 2>/dev/null | grep -q "$VERSION"; then
+            echo "Version $VERSION already on npm — skipping"
+          else
+            npm publish --provenance --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
