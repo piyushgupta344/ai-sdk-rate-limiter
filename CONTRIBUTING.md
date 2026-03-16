@@ -94,7 +94,7 @@ refactor: simplify drain scheduler
 ## Releasing (Maintainers)
 
 1. Update `CHANGELOG.md`: move `[Unreleased]` items to a new versioned section.
-2. Bump version in `package.json`.
+2. Bump version in `package.json` and `jsr.json` (keep them in sync).
 3. Commit: `git commit -m "chore: release vX.Y.Z"`
 4. Tag: `git tag vX.Y.Z && git push origin vX.Y.Z`
-5. The release workflow will publish to npm and create a GitHub Release automatically.
+5. The release workflow will publish to npm, JSR, and create a GitHub Release automatically.

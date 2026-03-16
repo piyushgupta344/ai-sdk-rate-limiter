@@ -48,6 +48,9 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Publish to JSR
+        run: npx jsr publish --allow-dirty
+
       - name: Create GitHub Release
         uses: actions/github-script@v8
         with:
