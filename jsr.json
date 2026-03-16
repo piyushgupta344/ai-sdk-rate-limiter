@@ -1,6 +1,6 @@
 {
   "name": "@piyushgupta344/ai-sdk-rate-limiter",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "exports": {
     ".": "./src/index.ts",
     "./redis": "./src/redis.ts",
