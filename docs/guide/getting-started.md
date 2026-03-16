@@ -2,9 +2,29 @@
 
 ## Installation
 
-```bash
+::: code-group
+
+```bash [npm]
 npm install ai-sdk-rate-limiter
 ```
+
+```bash [pnpm]
+pnpm add ai-sdk-rate-limiter
+```
+
+```bash [yarn]
+yarn add ai-sdk-rate-limiter
+```
+
+```bash [JSR (Deno / Node)]
+# Deno
+deno add jsr:@piyushgupta344/ai-sdk-rate-limiter
+
+# Node.js via npx
+npx jsr add @piyushgupta344/ai-sdk-rate-limiter
+```
+
+:::
 
 ### Optional peer dependencies
 
