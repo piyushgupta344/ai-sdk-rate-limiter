@@ -7,8 +7,7 @@
     "./otel": "./src/otel.ts",
     "./testing": "./src/testing.ts",
     "./prometheus": "./src/prometheus.ts",
-    "./statsd": "./src/statsd.ts",
-    "./middleware": "./src/middleware.ts"
+    "./statsd": "./src/statsd.ts"
   },
   "publish": {
     "include": [
