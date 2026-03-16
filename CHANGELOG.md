@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.13.1] - 2026-03-16
+
+### Added
+- Published to [JSR](https://jsr.io/@piyushgupta344/ai-sdk-rate-limiter) — install with `deno add jsr:@piyushgupta344/ai-sdk-rate-limiter` or `npx jsr add @piyushgupta344/ai-sdk-rate-limiter`
+
+---
+
 ## [0.13.0] - 2026-03-13
 
 ### Added
