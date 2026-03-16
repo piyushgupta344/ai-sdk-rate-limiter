@@ -9,8 +9,15 @@ Smart rate limiting, queuing, and cost tracking for AI API calls. Works across p
 [![npm downloads](https://img.shields.io/npm/dm/ai-sdk-rate-limiter)](https://www.npmjs.com/package/ai-sdk-rate-limiter)
 [![docs](https://img.shields.io/badge/docs-piyushgupta344.github.io-blue)](https://piyushgupta344.github.io/ai-sdk-rate-limiter/)
 
-```
+```bash
+# npm / pnpm / yarn
 npm install ai-sdk-rate-limiter
+
+# Deno (JSR)
+deno add jsr:@piyushgupta344/ai-sdk-rate-limiter
+
+# Node.js (JSR)
+npx jsr add @piyushgupta344/ai-sdk-rate-limiter
 ```
 
 **[Documentation →](https://piyushgupta344.github.io/ai-sdk-rate-limiter/)**
